@@ -373,7 +373,7 @@ TEMPLATE_TEST_CASE_SIG(
 
     // Integer-type ranges will coalesce and needn't be merged.
     // Float-type ranges cannot coalesce and will only be sorted.
-    if (D == Datatype::FLOAT32 || D == Datatype::FLOAT64) {
+    if constexpr (D == Datatype::FLOAT32 || D == Datatype::FLOAT64) {
       CHECK(range_subset.num_ranges() == 4);
       ThreadPool pool{2};
       range_subset.sort_and_merge_ranges(&pool, merge);
@@ -409,7 +409,7 @@ TEMPLATE_TEST_CASE_SIG(
     range_subset.sort_and_merge_ranges(&pool, merge);
 
     // Check range results.
-    if (D == Datatype::FLOAT32 || D == Datatype::FLOAT64) {
+    if constexpr (D == Datatype::FLOAT32 || D == Datatype::FLOAT64) {
       CHECK(range_subset.num_ranges() == 4);
       check_subset_range_values(range_subset, 0, data1[0], data1[1]);
       check_subset_range_values(range_subset, 1, data3[0], data3[1]);
@@ -644,6 +644,30 @@ TEST_CASE(
       check_subset_range_strings(range_subset, 1, "b", "d");
       check_subset_range_strings(range_subset, 2, "e", "f");
       check_subset_range_strings(range_subset, 3, "h", "j");
+    }
+  }
+
+  SECTION("Same first letter") {
+    std::vector<Range> ranges = {
+        Range("G1", "G1"), Range("G2", "G2"), Range("G59", "G59")};
+    for (auto range : ranges) {
+      range_subset.add_range(range);
+    }
+    CHECK(range_subset.num_ranges() == 3);
+    ThreadPool pool{2};
+    range_subset.sort_and_merge_ranges(&pool, merge);
+
+    // Check range results
+    if (merge) {
+      CHECK(range_subset.num_ranges() == 3);
+      check_subset_range_strings(range_subset, 0, "G1", "G1");
+      check_subset_range_strings(range_subset, 1, "G2", "G2");
+      check_subset_range_strings(range_subset, 2, "G59", "G59");
+    } else {
+      CHECK(range_subset.num_ranges() == 3);
+      check_subset_range_strings(range_subset, 0, "G1", "G1");
+      check_subset_range_strings(range_subset, 1, "G2", "G2");
+      check_subset_range_strings(range_subset, 2, "G59", "G59");
     }
   }
 }

@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2022 TileDB, Inc.
+ * @copyright Copyright (c) 2022-2023 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -41,8 +41,7 @@ using namespace tiledb;
 using namespace tiledb::common;
 using namespace tiledb::sm::stats;
 
-namespace tiledb {
-namespace sm {
+namespace tiledb::sm {
 
 class DeleteAndUpdateStatusException : public StatusException {
  public:
@@ -58,25 +57,10 @@ class DeleteAndUpdateStatusException : public StatusException {
 DeletesAndUpdates::DeletesAndUpdates(
     stats::Stats* stats,
     shared_ptr<Logger> logger,
-    StorageManager* storage_manager,
-    Array* array,
-    Config& config,
-    std::unordered_map<std::string, QueryBuffer>& buffers,
-    Subarray& subarray,
-    Layout layout,
-    std::optional<QueryCondition>& condition,
-    std::vector<UpdateValue>& update_values,
-    bool skip_checks_serialization)
-    : StrategyBase(
-          stats,
-          logger->clone("Deletes", ++logger_id_),
-          storage_manager,
-          array,
-          config,
-          buffers,
-          subarray,
-          layout)
-    , condition_(condition)
+    StrategyParams& params,
+    std::vector<UpdateValue>& update_values)
+    : StrategyBase(stats, logger->clone("Deletes", ++logger_id_), params)
+    , condition_(params.condition())
     , update_values_(update_values) {
   // Sanity checks
   if (storage_manager_ == nullptr) {
@@ -99,7 +83,7 @@ DeletesAndUpdates::DeletesAndUpdates(
         "Cannot initialize deletes; Subarrays are not supported");
   }
 
-  if (!skip_checks_serialization && !condition_.has_value()) {
+  if (!params.skip_checks_serialization() && !condition_.has_value()) {
     throw DeleteAndUpdateStatusException(
         "Cannot initialize deletes; One condition is needed");
   }
@@ -139,16 +123,15 @@ Status DeletesAndUpdates::dowork() {
   uint64_t timestamp = array_->timestamp_end_opened_at();
   auto write_version = array_->array_schema_latest().write_version();
   auto new_fragment_str =
-      storage_format::generate_fragment_name(timestamp, write_version);
+      storage_format::generate_timestamped_name(timestamp, write_version);
 
   // Check that the delete or update isn't in the middle of a fragment
   // consolidated without timestamps.
   auto& frag_uris = array_->array_directory().unfiltered_fragment_uris();
   for (auto& uri : frag_uris) {
-    uint32_t version;
     auto name = uri.remove_trailing_slash().last_path_part();
-    RETURN_NOT_OK(utils::parse::get_fragment_version(name, &version));
-    if (version < constants::consolidation_with_timestamps_min_version) {
+    auto format_version = utils::parse::get_fragment_version(name);
+    if (format_version < constants::consolidation_with_timestamps_min_version) {
       std::pair<uint64_t, uint64_t> fragment_timestamp_range;
       RETURN_NOT_OK(
           utils::parse::get_timestamp_range(uri, &fragment_timestamp_range));
@@ -192,5 +175,4 @@ std::string DeletesAndUpdates::name() {
   return "DeletesAndUpdates";
 }
 
-}  // namespace sm
-}  // namespace tiledb
+}  // namespace tiledb::sm

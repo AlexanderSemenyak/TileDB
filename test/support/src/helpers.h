@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2023 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -37,6 +37,7 @@
 #include "test/support/src/coords_workaround.h"
 #include "tiledb.h"
 #include "tiledb/common/common.h"
+#include "tiledb/common/random/random_label.h"
 #include "tiledb/sm/array/array.h"
 #include "tiledb/sm/cpp_api/tiledb"
 #include "tiledb/sm/enums/layout.h"
@@ -67,13 +68,11 @@ extern std::mutex catch2_macro_mutex;
     REQUIRE(a);                                           \
   }
 
-namespace tiledb {
-
-namespace sm {
+namespace tiledb::sm {
 class SubarrayPartitioner;
 }
 
-namespace test {
+namespace tiledb::test {
 
 // A dummy `Stats` instance. This is useful for constructing
 // objects that require a parent `Stats` object. These stats are
@@ -84,12 +83,26 @@ static tiledb::sm::stats::Stats g_helper_stats("test");
 // objects that require a parent `Logger` object.
 shared_ptr<Logger> g_helper_logger(void);
 
-const std::string& get_temp_path();
-
 // For easy reference
 typedef std::pair<tiledb_filter_type_t, int> Compressor;
 template <class T>
 using SubarrayRanges = std::vector<std::vector<T>>;
+
+/**
+ * Throws if the return code is not OK.
+ * For use in test setup for object allocation.
+ *
+ * @param rc Return code from a TileDB C-API setup function.
+ */
+void throw_if_setup_failed(int rc);
+
+/**
+ * Throws if the condition is not met.
+ * For use in test setup for object allocation.
+ *
+ * @param condition Condition to check from a TileDB C-API setup function.
+ */
+void throw_if_setup_failed(bool condition);
 
 /**
  * Check the return code for a TileDB C-API function is TILEDB_ERR and
@@ -307,7 +320,6 @@ void create_array(
  * @param array_name The array name.
  * @param enc_type The encryption type.
  * @param key The key to encrypt the array with.
- * @param key_len The key length.
  * @param array_type The array type (dense or sparse).
  * @param dim_names The names of dimensions.
  * @param dim_types The types of dimensions.
@@ -327,7 +339,6 @@ void create_array(
     const std::string& array_name,
     tiledb_encryption_type_t enc_type,
     const char* key,
-    uint32_t key_len,
     tiledb_array_type_t array_type,
     const std::vector<std::string>& dim_names,
     const std::vector<tiledb_datatype_t>& dim_types,
@@ -471,21 +482,8 @@ void create_subarray(
     bool coalesce_ranges = false);
 
 /**
- * Helper method that creates a TileDB context and a VFS object.
- *
- * @param s3_supported Indicates whether S3 is supported or not.
- * @param azure_supported Indicates whether Azure is supported or not.
- * @param ctx The TileDB context to be created.
- * @param vfs The VFS object to be created.
- */
-void create_ctx_and_vfs(
-    bool s3_supported,
-    bool azure_supported,
-    tiledb_ctx_t** ctx,
-    tiledb_vfs_t** vfs);
-
-/**
  * Helper function to get the supported filesystems.
+ * Supports VFS override via "--vfs" command line argument.
  *
  * @param s3_supported Set to `true` if S3 is supported.
  * @param hdfs_supported Set to `true` if HDFS is supported.
@@ -506,15 +504,6 @@ void get_supported_fs(
  * @param query_type The query type.
  */
 void open_array(tiledb_ctx_t* ctx, tiledb_array_t* array, tiledb_query_type_t);
-
-/**
- * Returns a random bucket name, with `prefix` as prefix and using
- * the thread id as a "random" suffix.
- *
- * @param prefix The prefix of the bucket name.
- * @return A random bucket name.
- */
-std::string random_name(const std::string& prefix);
 
 /**
  * Helper method that removes a directory.
@@ -577,7 +566,6 @@ void write_array(
  * @param array_name The array name.
  * @param encyrption_type The type of encryption.
  * @param key The encryption key.
- * @param key_len The encryption key length.
  * @param timestamp The timestamp to write at.
  * @param layout The layout to write into.
  * @param buffers The attribute/dimension buffers to be written.
@@ -587,7 +575,6 @@ void write_array(
     const std::string& array_name,
     tiledb_encryption_type_t encryption_type,
     const char* key,
-    uint64_t key_len,
     uint64_t timestamp,
     tiledb_layout_t layout,
     const QueryBuffers& buffers);
@@ -649,7 +636,6 @@ void write_array(
  * @param array_name The array name.
  * @param encyrption_type The type of encryption.
  * @param key The encryption key.
- * @param key_len The encryption key length.
  * @param timestamp The timestamp to write at.
  * @param subarray The subarray to write into.
  * @param layout The layout to write into.
@@ -660,7 +646,6 @@ void write_array(
     const std::string& array_name,
     tiledb_encryption_type_t encryption_type,
     const char* key,
-    uint64_t key_len,
     uint64_t timestamp,
     const void* subarray,
     tiledb_layout_t layout,
@@ -691,7 +676,6 @@ void write_array(
  * @param array_name The array name.
  * @param encyrption_type The type of encryption.
  * @param key The encryption key.
- * @param key_len The encryption key length.
  * @param timestamp The timestamp to write at.
  * @param layout The layout to write into.
  * @param buffers The attribute/dimension buffers to be written.
@@ -702,7 +686,6 @@ void write_array(
     const std::string& array_name,
     tiledb_encryption_type_t encryption_type,
     const char* key,
-    uint64_t key_len,
     uint64_t timestamp,
     tiledb_layout_t layout,
     const QueryBuffers& buffers,
@@ -737,7 +720,6 @@ void write_array(
  * @param array_name The array name.
  * @param encyrption_type The type of encryption.
  * @param key The encryption key.
- * @param key_len The encryption key length.
  * @param timestamp The timestamp to write at.
  * @param subarray The subarray to write into.
  * @param layout The layout to write into.
@@ -749,7 +731,6 @@ void write_array(
     const std::string& array_name,
     tiledb_encryption_type_t encryption_type,
     const char* key,
-    uint64_t key_len,
     uint64_t timestamp,
     const void* subarray,
     tiledb_layout_t layout,
@@ -1011,8 +992,6 @@ void allocate_query_buffers_server_side(
     tiledb_query_t* query,
     ServerQueryBuffers& query_buffers);
 
-}  // End of namespace test
-
-}  // End of namespace tiledb
+}  // namespace tiledb::test
 
 #endif

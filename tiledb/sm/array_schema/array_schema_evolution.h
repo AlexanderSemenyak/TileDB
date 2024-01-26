@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2023 TileDB, Inc.
  * @copyright Copyright (c) 2016 MIT and Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -42,12 +42,10 @@
 #include "tiledb/sm/filter/filter_pipeline.h"
 #include "tiledb/sm/misc/constants.h"
 #include "tiledb/sm/misc/hilbert.h"
-#include "tiledb/sm/misc/uuid.h"
 
 using namespace tiledb::common;
 
-namespace tiledb {
-namespace sm {
+namespace tiledb::sm {
 
 class Attribute;
 class Buffer;
@@ -83,6 +81,8 @@ class ArraySchemaEvolution {
       std::unordered_set<std::string> attrs_to_drop,
       std::unordered_map<std::string, shared_ptr<const Enumeration>>
           enmrs_to_add,
+      std::unordered_map<std::string, shared_ptr<const Enumeration>>
+          enmrs_to_extend,
       std::unordered_set<std::string> enmrs_to_drop,
       std::pair<uint64_t, uint64_t> timestamp_range);
 
@@ -143,6 +143,26 @@ class ArraySchemaEvolution {
       const std::string& name) const;
 
   /**
+   * Extend an enumeration.
+   *
+   * @param enmr The enumeration with its extension.
+   */
+  void extend_enumeration(shared_ptr<const Enumeration> enmr);
+
+  /** Returns the names of the enumerations to extend. */
+  std::vector<std::string> enumeration_names_to_extend() const;
+
+  /**
+   * Returns a constant pointer to the selected enumeration or nullptr if it
+   * does not exist.
+   *
+   * @param name The name of the enumeration to extend.
+   * @return shared_ptr<const Enumeration> The enumeration to extend.
+   */
+  shared_ptr<const Enumeration> enumeration_to_extend(
+      const std::string& name) const;
+
+  /**
    * Drops an enumeration
    *
    * @param enumeration_name The enumeration to be dropped.
@@ -175,6 +195,10 @@ class ArraySchemaEvolution {
   std::unordered_map<std::string, shared_ptr<const Enumeration>>
       enumerations_to_add_map_;
 
+  /** Enumerations to extend. */
+  std::unordered_map<std::string, shared_ptr<const Enumeration>>
+      enumerations_to_extend_map_;
+
   /** The names of array enumerations to be dropped. */
   std::unordered_set<std::string> enumerations_to_drop_;
 
@@ -197,7 +221,6 @@ class ArraySchemaEvolution {
   void clear();
 };
 
-}  // namespace sm
-}  // namespace tiledb
+}  // namespace tiledb::sm
 
 #endif  // TILEDB_SCHEMA_EVOLUTION_H

@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2021-2022 TileDB, Inc.
+ * @copyright Copyright (c) 2021-2024 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -51,10 +51,20 @@
 
 using namespace tiledb::common;
 
-namespace tiledb {
-namespace sm {
+namespace tiledb::sm {
 
 QueryCondition::QueryCondition() {
+}
+
+QueryCondition::QueryCondition(
+    const std::string& field_name,
+    const void* data,
+    uint64_t data_size,
+    const void* offsets,
+    uint64_t offsets_size,
+    QueryConditionOp op) {
+  tree_ = tdb_unique_ptr<ASTNode>(tdb_new(
+      ASTNodeVal, field_name, data, data_size, offsets, offsets_size, op));
 }
 
 QueryCondition::QueryCondition(const std::string& condition_marker)
@@ -544,6 +554,40 @@ struct QueryCondition::BinaryCmpNullChecks<T, QueryConditionOp::NE> {
   }
 };
 
+/** Partial template specialization for `QueryConditionOp::IN`. */
+template <typename T>
+struct QueryCondition::BinaryCmpNullChecks<T, QueryConditionOp::IN> {
+  static inline bool cmp(
+      const void* lhs, uint64_t lhs_size, const void* rhs, uint64_t) {
+    if (lhs == nullptr) {
+      return false;
+    }
+
+    std::string_view sv(static_cast<const char*>(lhs), lhs_size);
+    auto members =
+        static_cast<const std::unordered_set<std::string_view>*>(rhs);
+
+    return members->find(sv) != members->end();
+  }
+};
+
+/** Partial template specialization for `QueryConditionOp::NOT_IN`. */
+template <typename T>
+struct QueryCondition::BinaryCmpNullChecks<T, QueryConditionOp::NOT_IN> {
+  static inline bool cmp(
+      const void* lhs, uint64_t lhs_size, const void* rhs, uint64_t) {
+    if (lhs == nullptr) {
+      return false;
+    }
+
+    std::string_view sv(static_cast<const char*>(lhs), lhs_size);
+    auto members =
+        static_cast<const std::unordered_set<std::string_view>*>(rhs);
+
+    return members->find(sv) == members->end();
+  }
+};
+
 template <typename T, QueryConditionOp Op, typename CombinationOp>
 void QueryCondition::apply_ast_node(
     const tdb_unique_ptr<ASTNode>& node,
@@ -556,9 +600,8 @@ void QueryCondition::apply_ast_node(
     CombinationOp combination_op,
     std::vector<uint8_t>& result_cell_bitmap) const {
   const std::string& field_name = node->get_field_name();
-  const void* condition_value_content =
-      node->get_condition_value_view().content();
-  const size_t condition_value_size = node->get_condition_value_view().size();
+  const void* condition_value_content = node->get_value_ptr();
+  const size_t condition_value_size = node->get_value_size();
   uint64_t starting_index = 0;
   for (const auto& rcs : result_cell_slabs) {
     ResultTile* const result_tile = rcs.tile_;
@@ -607,7 +650,7 @@ void QueryCondition::apply_ast_node(
 
       if (nullable) {
         const auto& tile_validity = tile_tuple->validity_tile();
-        buffer_validity = static_cast<uint8_t*>(tile_validity.data());
+        buffer_validity = tile_validity.data_as<uint8_t>();
       }
 
       // Start the pending result cell slab at the start position
@@ -616,22 +659,16 @@ void QueryCondition::apply_ast_node(
 
       if (var_size) {
         const auto& tile = tile_tuple->var_tile();
-        const char* buffer = static_cast<char*>(tile.data());
-        const uint64_t buffer_size = tile.size();
+        const char* buffer = tile.data_as<char>();
 
         const auto& tile_offsets = tile_tuple->fixed_tile();
-        const uint64_t* buffer_offsets =
-            static_cast<uint64_t*>(tile_offsets.data());
-        const uint64_t buffer_offsets_el =
-            tile_offsets.size() / constants::cell_var_offset_size;
+        const offsets_t* buffer_offsets = tile_offsets.data_as<offsets_t>();
 
         // Iterate through each cell in this slab.
         while (c < length) {
           const uint64_t buffer_offset = buffer_offsets[start + c * stride];
           const uint64_t next_cell_offset =
-              (start + c * stride + 1 < buffer_offsets_el) ?
-                  buffer_offsets[start + c * stride + 1] :
-                  buffer_size;
+              buffer_offsets[start + c * stride + 1];
           const uint64_t cell_size = next_cell_offset - buffer_offset;
 
           const bool null_cell =
@@ -670,7 +707,7 @@ void QueryCondition::apply_ast_node(
           }
         } else {
           const auto& tile = tile_tuple->fixed_tile();
-          const char* buffer = static_cast<char*>(tile.data());
+          const char* buffer = tile.data_as<char>();
           const uint64_t cell_size = tile.cell_size();
           uint64_t buffer_offset = start * cell_size;
           const uint64_t buffer_offset_inc = stride * cell_size;
@@ -777,6 +814,30 @@ void QueryCondition::apply_ast_node(
       break;
     case QueryConditionOp::NE:
       apply_ast_node<T, QueryConditionOp::NE, CombinationOp>(
+          node,
+          fragment_metadata,
+          stride,
+          var_size,
+          nullable,
+          fill_value,
+          result_cell_slabs,
+          combination_op,
+          result_cell_bitmap);
+      break;
+    case QueryConditionOp::IN:
+      apply_ast_node<T, QueryConditionOp::IN, CombinationOp>(
+          node,
+          fragment_metadata,
+          stride,
+          var_size,
+          nullable,
+          fill_value,
+          result_cell_slabs,
+          combination_op,
+          result_cell_bitmap);
+      break;
+    case QueryConditionOp::NOT_IN:
+      apply_ast_node<T, QueryConditionOp::NOT_IN, CombinationOp>(
           node,
           fragment_metadata,
           stride,
@@ -1029,6 +1090,8 @@ void QueryCondition::apply_ast_node(
     } break;
     case Datatype::ANY:
     case Datatype::BLOB:
+    case Datatype::GEOM_WKB:
+    case Datatype::GEOM_WKT:
     case Datatype::STRING_UTF16:
     case Datatype::STRING_UTF32:
     case Datatype::STRING_UCS2:
@@ -1036,9 +1099,8 @@ void QueryCondition::apply_ast_node(
     default:
       throw std::runtime_error(
           "QueryCondition::apply_ast_node: Cannot perform query comparison; "
-          "Unsupported query "
-          "conditional type on " +
-          node->get_field_name());
+          "Unsupported datatype " +
+          datatype_str(type) + " on " + node->get_field_name());
   }
 
   return;
@@ -1281,40 +1343,33 @@ void QueryCondition::apply_ast_node_dense(
     const void* cell_slab_coords,
     span<uint8_t> result_buffer) const {
   const std::string& field_name = node->get_field_name();
-  const void* condition_value_content =
-      node->get_condition_value_view().content();
-  const size_t condition_value_size = node->get_condition_value_view().size();
+  const void* condition_value_content = node->get_value_ptr();
+  const size_t condition_value_size = node->get_value_size();
 
   // Get the nullable buffer.
   const auto tile_tuple = result_tile->tile_tuple(field_name);
   uint8_t* buffer_validity = nullptr;
   if (nullable) {
     const auto& tile_validity = tile_tuple->validity_tile();
-    buffer_validity = static_cast<uint8_t*>(tile_validity.data()) + src_cell;
+    buffer_validity = tile_validity.data_as<uint8_t>() + src_cell;
   }
 
   if (var_size) {
     // Get var data buffer and tile offsets buffer.
     const auto& tile = tile_tuple->var_tile();
-    const char* buffer = static_cast<char*>(tile.data());
-    const uint64_t buffer_size = tile.size();
+    const char* buffer = tile.data_as<char>();
 
     const auto& tile_offsets = tile_tuple->fixed_tile();
-    const uint64_t* buffer_offsets =
-        static_cast<uint64_t*>(tile_offsets.data());
-    const uint64_t buffer_offsets_el =
-        tile_offsets.size() / constants::cell_var_offset_size;
+    const offsets_t* buffer_offsets = tile_offsets.data_as<offsets_t>();
 
     // Iterate through each cell in this slab.
     for (uint64_t c = 0; c < result_buffer.size(); ++c) {
       // Check the next cell here, which breaks vectorization but as this
       // is string data requiring a strcmp which cannot be vectorized, this is
       // ok.
-      const uint64_t offset_idx = start + src_cell + c * stride;
-      const uint64_t buffer_offset = buffer_offsets[offset_idx];
-      const uint64_t next_cell_offset = (offset_idx + 1 < buffer_offsets_el) ?
-                                            buffer_offsets[offset_idx + 1] :
-                                            buffer_size;
+      const uint64_t offset_idx = src_cell + (start + c) * stride;
+      const offsets_t buffer_offset = buffer_offsets[offset_idx];
+      const offsets_t next_cell_offset = buffer_offsets[offset_idx + 1];
       const uint64_t cell_size = next_cell_offset - buffer_offset;
 
       // Get the cell value.
@@ -1327,7 +1382,7 @@ void QueryCondition::apply_ast_node_dense(
       // Set the value.
       bool buffer_validity_val = buffer_validity == nullptr ?
                                      true :
-                                     buffer_validity[start + c * stride] != 0;
+                                     buffer_validity[(start + c) * stride] != 0;
       result_buffer[c] =
           combination_op(result_buffer[c], (uint8_t)cmp && buffer_validity_val);
     }
@@ -1345,9 +1400,9 @@ void QueryCondition::apply_ast_node_dense(
     } else {
       // Get the fixed size data buffers.
       const auto& tile = tile_tuple->fixed_tile();
-      const char* buffer = static_cast<char*>(tile.data());
+      const char* buffer = tile.data_as<char>();
       const uint64_t cell_size = tile.cell_size();
-      uint64_t buffer_offset = (start + src_cell) * cell_size;
+      uint64_t buffer_offset = ((start * stride) + src_cell) * cell_size;
       const uint64_t buffer_offset_inc = stride * cell_size;
 
       // Iterate through each cell in this slab.
@@ -1364,9 +1419,10 @@ void QueryCondition::apply_ast_node_dense(
             condition_value_size);
 
         // Set the value.
-        bool buffer_validity_val = buffer_validity == nullptr ?
-                                       true :
-                                       buffer_validity[start + c * stride] != 0;
+        bool buffer_validity_val =
+            buffer_validity == nullptr ?
+                true :
+                buffer_validity[(start + c) * stride] != 0;
         result_buffer[c] = combination_op(
             result_buffer[c], (uint8_t)cmp && buffer_validity_val);
       }
@@ -1472,6 +1528,34 @@ void QueryCondition::apply_ast_node_dense(
           cell_slab_coords,
           result_buffer);
       break;
+    case QueryConditionOp::IN:
+      apply_ast_node_dense<T, QueryConditionOp::IN, CombinationOp>(
+          node,
+          array_schema,
+          result_tile,
+          start,
+          src_cell,
+          stride,
+          var_size,
+          nullable,
+          combination_op,
+          cell_slab_coords,
+          result_buffer);
+      break;
+    case QueryConditionOp::NOT_IN:
+      apply_ast_node_dense<T, QueryConditionOp::NOT_IN, CombinationOp>(
+          node,
+          array_schema,
+          result_tile,
+          start,
+          src_cell,
+          stride,
+          var_size,
+          nullable,
+          combination_op,
+          cell_slab_coords,
+          result_buffer);
+      break;
     default:
       throw std::runtime_error(
           "Cannot perform query comparison; Unknown query condition "
@@ -1507,11 +1591,10 @@ void QueryCondition::apply_ast_node_dense(
   }
 
   // Process the validity buffer now.
-  if (nullable && node->get_condition_value_view().content() == nullptr) {
+  if (nullable && node->get_value_ptr() == nullptr) {
     const auto tile_tuple = result_tile->tile_tuple(name);
     const auto& tile_validity = tile_tuple->validity_tile();
-    const auto buffer_validity =
-        static_cast<uint8_t*>(tile_validity.data()) + src_cell;
+    const auto buffer_validity = tile_validity.data_as<uint8_t>() + src_cell;
 
     // Null values can only be specified for equality operators.
     if (node->get_op() == QueryConditionOp::NE) {
@@ -1764,6 +1847,8 @@ void QueryCondition::apply_ast_node_dense(
     } break;
     case Datatype::ANY:
     case Datatype::BLOB:
+    case Datatype::GEOM_WKB:
+    case Datatype::GEOM_WKT:
     case Datatype::STRING_UTF16:
     case Datatype::STRING_UTF32:
     case Datatype::STRING_UCS2:
@@ -1771,9 +1856,8 @@ void QueryCondition::apply_ast_node_dense(
     default:
       throw std::runtime_error(
           "Cannot perform query comparison; Unsupported query conditional "
-          "type "
-          "on " +
-          node->get_field_name());
+          "type " +
+          datatype_str(type) + " on " + node->get_field_name());
   }
 }
 
@@ -2173,6 +2257,30 @@ struct QueryCondition::BinaryCmp<T, QueryConditionOp::NE> {
   }
 };
 
+/** Partial template specialization for `QueryConditionOp::IN`. */
+template <typename T>
+struct QueryCondition::BinaryCmp<T, QueryConditionOp::IN> {
+  static inline bool cmp(
+      const void* lhs, uint64_t lhs_size, const void* rhs, uint64_t) {
+    std::string_view sv(static_cast<const char*>(lhs), lhs_size);
+    auto members =
+        static_cast<const std::unordered_set<std::string_view>*>(rhs);
+    return members->find(sv) != members->end();
+  }
+};
+
+/** Partial template specialization for `QueryConditionOp::NOT_IN`. */
+template <typename T>
+struct QueryCondition::BinaryCmp<T, QueryConditionOp::NOT_IN> {
+  static inline bool cmp(
+      const void* lhs, uint64_t lhs_size, const void* rhs, uint64_t) {
+    std::string_view sv(static_cast<const char*>(lhs), lhs_size);
+    auto members =
+        static_cast<const std::unordered_set<std::string_view>*>(rhs);
+    return members->find(sv) == members->end();
+  }
+};
+
 template <typename T>
 struct QCMax {
   const T& operator()(const T& a, const T& b) const {
@@ -2193,38 +2301,33 @@ void QueryCondition::apply_ast_node_sparse(
     CombinationOp combination_op,
     std::vector<BitmapType>& result_bitmap) const {
   const auto tile_tuple = result_tile.tile_tuple(node->get_field_name());
-  const void* condition_value_content =
-      node->get_condition_value_view().content();
-  const size_t condition_value_size = node->get_condition_value_view().size();
+  const void* condition_value_content = node->get_value_ptr();
+  const size_t condition_value_size = node->get_value_size();
   uint8_t* buffer_validity = nullptr;
 
   // Check if the combination op = OR and the attribute is nullable.
   if constexpr (
       std::is_same_v<CombinationOp, QCMax<BitmapType>> && nullable::value) {
     const auto& tile_validity = tile_tuple->validity_tile();
-    buffer_validity = static_cast<uint8_t*>(tile_validity.data());
+    buffer_validity = tile_validity.data_as<uint8_t>();
   }
 
   if (var_size) {
     // Get var data buffer and tile offsets buffer.
     const auto& tile = tile_tuple->var_tile();
-    const char* buffer = static_cast<char*>(tile.data());
-    const uint64_t buffer_size = tile.size();
+    const char* buffer = tile.data_as<char>();
 
     const auto& tile_offsets = tile_tuple->fixed_tile();
-    const uint64_t* buffer_offsets =
-        static_cast<uint64_t*>(tile_offsets.data());
-    const uint64_t buffer_offsets_el =
-        tile_offsets.size() / constants::cell_var_offset_size;
+    const offsets_t* buffer_offsets = tile_offsets.data_as<offsets_t>();
+    const uint64_t buffer_offsets_el = tile_offsets.size_as<offsets_t>() - 1;
 
     // Iterate through each cell.
     for (uint64_t c = 0; c < buffer_offsets_el; ++c) {
       // Check the previous cell here, which breaks vectorization but as this
       // is string data requiring a strcmp which cannot be vectorized, this is
       // ok.
-      const uint64_t buffer_offset = buffer_offsets[c];
-      const uint64_t next_cell_offset =
-          (c + 1 < buffer_offsets_el) ? buffer_offsets[c + 1] : buffer_size;
+      const offsets_t buffer_offset = buffer_offsets[c];
+      const offsets_t next_cell_offset = buffer_offsets[c + 1];
       const uint64_t cell_size = next_cell_offset - buffer_offset;
 
       // Get the cell value.
@@ -2247,7 +2350,7 @@ void QueryCondition::apply_ast_node_sparse(
   } else {
     // Get the fixed size data buffers.
     const auto& tile = tile_tuple->fixed_tile();
-    const char* buffer = static_cast<char*>(tile.data());
+    const char* buffer = tile.data_as<char>();
     const uint64_t cell_size = tile.cell_size();
     const uint64_t buffer_el = tile.size() / cell_size;
 
@@ -2334,6 +2437,22 @@ void QueryCondition::apply_ast_node_sparse(
           CombinationOp,
           nullable>(node, result_tile, var_size, combination_op, result_bitmap);
       break;
+    case QueryConditionOp::IN:
+      apply_ast_node_sparse<
+          T,
+          QueryConditionOp::IN,
+          BitmapType,
+          CombinationOp,
+          nullable>(node, result_tile, var_size, combination_op, result_bitmap);
+      break;
+    case QueryConditionOp::NOT_IN:
+      apply_ast_node_sparse<
+          T,
+          QueryConditionOp::NOT_IN,
+          BitmapType,
+          CombinationOp,
+          nullable>(node, result_tile, var_size, combination_op, result_bitmap);
+      break;
     default:
       throw std::runtime_error(
           "Cannot perform query comparison; Unknown query condition "
@@ -2379,10 +2498,10 @@ void QueryCondition::apply_ast_node_sparse(
   if (nullable) {
     const auto tile_tuple = result_tile.tile_tuple(node_field_name);
     const auto& tile_validity = tile_tuple->validity_tile();
-    const auto buffer_validity = static_cast<uint8_t*>(tile_validity.data());
+    const auto buffer_validity = tile_validity.data_as<uint8_t>();
     const auto cell_num = result_tile.cell_num();
 
-    if (node->get_condition_value_view().content() == nullptr) {
+    if (node->get_value_ptr() == nullptr) {
       // Null values can only be specified for equality operators.
       if (node->get_op() == QueryConditionOp::NE) {
         for (uint64_t c = 0; c < cell_num; c++) {
@@ -2503,6 +2622,8 @@ void QueryCondition::apply_ast_node_sparse(
     } break;
     case Datatype::ANY:
     case Datatype::BLOB:
+    case Datatype::GEOM_WKB:
+    case Datatype::GEOM_WKT:
     case Datatype::STRING_UTF16:
     case Datatype::STRING_UTF32:
     case Datatype::STRING_UCS2:
@@ -2649,5 +2770,4 @@ template Status QueryCondition::apply_sparse<uint8_t>(
     const ArraySchema& array_schema, ResultTile&, std::vector<uint8_t>&);
 template Status QueryCondition::apply_sparse<uint64_t>(
     const ArraySchema& array_schema, ResultTile&, std::vector<uint64_t>&);
-}  // namespace sm
-}  // namespace tiledb
+}  // namespace tiledb::sm

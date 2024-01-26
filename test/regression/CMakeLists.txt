@@ -46,12 +46,20 @@ if (TILEDB_CPP_API)
   list(APPEND SOURCES targets/sc-24079.cc)
   list(APPEND SOURCES targets/sc-25116.cc)
   list(APPEND SOURCES targets/sc-29682.cc)
+  list(APPEND SOURCES targets/sc-33480.cc)
+  list(APPEND SOURCES targets/sc-35424.cc)
+  list(APPEND SOURCES targets/sc-36372.cc)
+  list(APPEND SOURCES targets/sc-38300.cc)
 endif()
 
 add_executable(tiledb_regression
   EXCLUDE_FROM_ALL
   regression.cc
   ${SOURCES}
+)
+
+target_compile_definitions(tiledb_regression PRIVATE
+  -DTILEDB_TEST_INPUTS_DIR="${CMAKE_SOURCE_DIR}/test/inputs/"
 )
 
 if (NOT MSVC)
@@ -62,7 +70,7 @@ target_link_libraries(tiledb_regression
   PUBLIC
     Catch2::Catch2WithMain
     local_install
-    tiledb_shared
+    tiledb
 )
 
 target_include_directories(tiledb_regression

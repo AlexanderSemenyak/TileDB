@@ -57,8 +57,10 @@
 #include "tiledb/sm/rest/rest_client.h"
 #include "tiledb/sm/rtree/rtree.h"
 #include "tiledb/sm/stats/global_stats.h"
+#include "tiledb/sm/storage_manager/storage_manager.h"
 #include "tiledb/sm/subarray/relevant_fragment_generator.h"
 #include "tiledb/sm/subarray/subarray.h"
+#include "tiledb/type/apply_with_type.h"
 #include "tiledb/type/range/range.h"
 
 using namespace tiledb::common;
@@ -97,7 +99,7 @@ Subarray::Subarray(
     const bool coalesce_ranges,
     StorageManager* storage_manager)
     : Subarray(
-          array,
+          array->opened_array(),
           Layout::UNORDERED,
           parent_stats,
           logger,
@@ -112,17 +114,33 @@ Subarray::Subarray(
     shared_ptr<Logger> logger,
     const bool coalesce_ranges,
     StorageManager* storage_manager)
+    : Subarray(
+          array->opened_array(),
+          layout,
+          parent_stats,
+          logger,
+          coalesce_ranges,
+          storage_manager) {
+}
+
+Subarray::Subarray(
+    const shared_ptr<OpenedArray> opened_array,
+    const Layout layout,
+    Stats* const parent_stats,
+    shared_ptr<Logger> logger,
+    const bool coalesce_ranges,
+    StorageManager* storage_manager)
     : stats_(
           parent_stats ? parent_stats->create_child("Subarray") :
           storage_manager ?
                          storage_manager->stats()->create_child("subSubarray") :
                          nullptr)
     , logger_(logger->clone("Subarray", ++logger_id_))
-    , array_(array)
+    , array_(opened_array)
     , layout_(layout)
-    , cell_order_(array_->array_schema_latest().cell_order())
+    , cell_order_(opened_array->array_schema_latest().cell_order())
     , est_result_size_computed_(false)
-    , relevant_fragments_(array->fragment_metadata().size())
+    , relevant_fragments_(opened_array->fragment_metadata().size())
     , coalesce_ranges_(coalesce_ranges)
     , ranges_sorted_(false) {
   if (!parent_stats && !storage_manager) {
@@ -732,7 +750,7 @@ Status Subarray::get_range_var_from_name(
 
   return get_range_var(dim_idx, range_idx, start, end);
 }
-const Array* Subarray::array() const {
+const shared_ptr<OpenedArray> Subarray::array() const {
   return array_;
 }
 
@@ -1095,12 +1113,9 @@ void Subarray::set_layout(Layout layout) {
   layout_ = layout;
 }
 
-void Subarray::set_config(const Config& config) {
+void Subarray::set_config(const QueryType query_type, const Config& config) {
   config_.inherit(config);
-
-  QueryType array_query_type{array_->get_query_type()};
-
-  if (array_query_type == QueryType::READ) {
+  if (query_type == QueryType::READ) {
     bool found = false;
     std::string read_range_oob_str = config.get("sm.read_range_oob", &found);
     assert(found);
@@ -2003,6 +2018,7 @@ Status Subarray::compute_relevant_fragment_est_result_sizes(
               mem_vec[i].size_validity_ +=
                   tile_size / cell_size * constants::cell_validity_size;
           } else {
+            tile_size -= constants::cell_var_offset_size;
             auto tile_var_size = meta->tile_var_size(names[i], ft.second);
             mem_vec[i].size_fixed_ += tile_size;
             mem_vec[i].size_var_ += tile_var_size;
@@ -2312,6 +2328,7 @@ Status Subarray::compute_relevant_fragment_est_result_sizes(
                   tile_size / attr_datatype_size *
                   constants::cell_validity_size;
           } else {
+            tile_size -= constants::cell_var_offset_size;
             (*result_sizes)[n].size_fixed_ += tile_size;
             auto tile_var_size = meta->tile_var_size(names[n], tid);
             (*result_sizes)[n].size_var_ += tile_var_size;
@@ -2351,6 +2368,7 @@ Status Subarray::compute_relevant_fragment_est_result_sizes(
                 ratio;
 
         } else {
+          tile_size -= constants::cell_var_offset_size;
           (*result_sizes)[n].size_fixed_ += tile_size * ratio;
           auto tile_var_size = meta->tile_var_size(names[n], tid);
           (*result_sizes)[n].size_var_ += tile_var_size * ratio;
@@ -2581,7 +2599,7 @@ Status Subarray::precompute_tile_overlap(
   // each successive loop. The intent is to minimize the number of loops
   // at the risk of exceeding our target maximum memory usage for the
   // tile overlap data.
-  RelevantFragmentGenerator relevant_fragment_generator(*array_, *this, stats_);
+  RelevantFragmentGenerator relevant_fragment_generator(array_, *this, stats_);
   ComputeRelevantTileOverlapCtx tile_overlap_ctx;
   SubarrayTileOverlap tile_overlap(
       fragment_num, tile_overlap_start, tmp_tile_overlap_end);
@@ -2637,7 +2655,7 @@ Status Subarray::precompute_all_ranges_tile_overlap(
 
   // Compute relevant fragments and load rtrees.
   ComputeRelevantTileOverlapCtx tile_overlap_ctx;
-  RelevantFragmentGenerator relevant_fragment_generator(*array_, *this, stats_);
+  RelevantFragmentGenerator relevant_fragment_generator(array_, *this, stats_);
   relevant_fragment_generator.update_range_coords(nullptr);
   relevant_fragments_ =
       relevant_fragment_generator.compute_relevant_fragments(compute_tp);
@@ -2762,54 +2780,16 @@ TileOverlap Subarray::compute_tile_overlap(
     uint64_t range_idx, unsigned fid) const {
   assert(array_->array_schema_latest().dense());
   auto type{array_->array_schema_latest().dimension_ptr(0)->type()};
-  switch (type) {
-    case Datatype::INT8:
-      return compute_tile_overlap<int8_t>(range_idx, fid);
-    case Datatype::UINT8:
-      return compute_tile_overlap<uint8_t>(range_idx, fid);
-    case Datatype::INT16:
-      return compute_tile_overlap<int16_t>(range_idx, fid);
-    case Datatype::UINT16:
-      return compute_tile_overlap<uint16_t>(range_idx, fid);
-    case Datatype::INT32:
-      return compute_tile_overlap<int32_t>(range_idx, fid);
-    case Datatype::UINT32:
-      return compute_tile_overlap<uint32_t>(range_idx, fid);
-    case Datatype::INT64:
-      return compute_tile_overlap<int64_t>(range_idx, fid);
-    case Datatype::UINT64:
-      return compute_tile_overlap<uint64_t>(range_idx, fid);
-    case Datatype::FLOAT32:
-      return compute_tile_overlap<float>(range_idx, fid);
-    case Datatype::FLOAT64:
-      return compute_tile_overlap<double>(range_idx, fid);
-    case Datatype::DATETIME_YEAR:
-    case Datatype::DATETIME_MONTH:
-    case Datatype::DATETIME_WEEK:
-    case Datatype::DATETIME_DAY:
-    case Datatype::DATETIME_HR:
-    case Datatype::DATETIME_MIN:
-    case Datatype::DATETIME_SEC:
-    case Datatype::DATETIME_MS:
-    case Datatype::DATETIME_US:
-    case Datatype::DATETIME_NS:
-    case Datatype::DATETIME_PS:
-    case Datatype::DATETIME_FS:
-    case Datatype::DATETIME_AS:
-    case Datatype::TIME_HR:
-    case Datatype::TIME_MIN:
-    case Datatype::TIME_SEC:
-    case Datatype::TIME_MS:
-    case Datatype::TIME_US:
-    case Datatype::TIME_NS:
-    case Datatype::TIME_PS:
-    case Datatype::TIME_FS:
-    case Datatype::TIME_AS:
-      return compute_tile_overlap<int64_t>(range_idx, fid);
-    default:
+
+  auto g = [&](auto T) {
+    if constexpr (std::is_same_v<decltype(T), char>) {
       assert(false);
-  }
-  return TileOverlap();
+      return TileOverlap();
+    } else {
+      return compute_tile_overlap<decltype(T)>(range_idx, fid);
+    }
+  };
+  return apply_with_type(g, type);
 }
 
 template <class T>
@@ -2986,7 +2966,8 @@ Status Subarray::load_relevant_fragment_rtrees(
 
   auto status =
       parallel_for(compute_tp, 0, relevant_fragments_.size(), [&](uint64_t f) {
-        return meta[relevant_fragments_[f]]->load_rtree(*encryption_key);
+        meta[relevant_fragments_[f]]->load_rtree(*encryption_key);
+        return Status::Ok();
       });
   RETURN_NOT_OK(status);
 
@@ -3039,8 +3020,8 @@ Status Subarray::compute_relevant_fragment_tile_overlap(
             compute_tile_overlap(r + tile_overlap->range_idx_start(), frag_idx);
       } else {  // Sparse fragment
         const auto& range = this->ndrange(r + tile_overlap->range_idx_start());
-        RETURN_NOT_OK(meta->get_tile_overlap(
-            range, is_default_, tile_overlap->at(frag_idx, r)));
+        meta->get_tile_overlap(
+            range, is_default_, tile_overlap->at(frag_idx, r));
       }
     }
 
@@ -3077,10 +3058,12 @@ Status Subarray::load_relevant_fragment_tile_var_sizes(
           // Gracefully skip loading tile sizes for attributes added in schema
           // evolution that do not exists in this fragment
           const auto& schema = meta[f]->array_schema();
-          if (!schema->is_field(var_name))
+          if (!schema->is_field(var_name)) {
             return Status::Ok();
+          }
 
-          return meta[f]->load_tile_var_sizes(*encryption_key, var_name);
+          meta[f]->load_tile_var_sizes(*encryption_key, var_name);
+          return Status::Ok();
         });
 
     RETURN_NOT_OK(status);
@@ -3101,7 +3084,6 @@ stats::Stats* Subarray::stats() const {
   return stats_;
 }
 
-template <typename T>
 tuple<Status, optional<bool>> Subarray::non_overlapping_ranges_for_dim(
     const uint64_t dim_idx) {
   const auto& ranges = range_subset_[dim_idx].ranges();
@@ -3109,80 +3091,12 @@ tuple<Status, optional<bool>> Subarray::non_overlapping_ranges_for_dim(
 
   if (ranges.size() > 1) {
     for (uint64_t r = 0; r < ranges.size() - 1; r++) {
-      if (dim->overlap<T>(ranges[r], ranges[r + 1]))
+      if (dim->overlap(ranges[r], ranges[r + 1]))
         return {Status::Ok(), false};
     }
   }
 
   return {Status::Ok(), true};
-}
-
-tuple<Status, optional<bool>> Subarray::non_overlapping_ranges_for_dim(
-    const uint64_t dim_idx) {
-  const Datatype& datatype{
-      array_->array_schema_latest().dimension_ptr(dim_idx)->type()};
-  switch (datatype) {
-    case Datatype::INT8:
-      return non_overlapping_ranges_for_dim<int8_t>(dim_idx);
-    case Datatype::UINT8:
-      return non_overlapping_ranges_for_dim<uint8_t>(dim_idx);
-    case Datatype::INT16:
-      return non_overlapping_ranges_for_dim<int16_t>(dim_idx);
-    case Datatype::UINT16:
-      return non_overlapping_ranges_for_dim<uint16_t>(dim_idx);
-    case Datatype::INT32:
-      return non_overlapping_ranges_for_dim<int32_t>(dim_idx);
-    case Datatype::UINT32:
-      return non_overlapping_ranges_for_dim<uint32_t>(dim_idx);
-    case Datatype::INT64:
-      return non_overlapping_ranges_for_dim<int64_t>(dim_idx);
-    case Datatype::UINT64:
-      return non_overlapping_ranges_for_dim<uint64_t>(dim_idx);
-    case Datatype::FLOAT32:
-      return non_overlapping_ranges_for_dim<float>(dim_idx);
-    case Datatype::FLOAT64:
-      return non_overlapping_ranges_for_dim<double>(dim_idx);
-    case Datatype::STRING_ASCII:
-      return non_overlapping_ranges_for_dim<char>(dim_idx);
-    case Datatype::CHAR:
-    case Datatype::BLOB:
-    case Datatype::BOOL:
-    case Datatype::STRING_UTF8:
-    case Datatype::STRING_UTF16:
-    case Datatype::STRING_UTF32:
-    case Datatype::STRING_UCS2:
-    case Datatype::STRING_UCS4:
-    case Datatype::ANY:
-      return {
-          LOG_STATUS(Status_SubarrayError(
-              "Invalid datatype " + datatype_str(datatype) + " for sorting")),
-          false};
-    case Datatype::DATETIME_YEAR:
-    case Datatype::DATETIME_MONTH:
-    case Datatype::DATETIME_WEEK:
-    case Datatype::DATETIME_DAY:
-    case Datatype::DATETIME_HR:
-    case Datatype::DATETIME_MIN:
-    case Datatype::DATETIME_SEC:
-    case Datatype::DATETIME_MS:
-    case Datatype::DATETIME_US:
-    case Datatype::DATETIME_NS:
-    case Datatype::DATETIME_PS:
-    case Datatype::DATETIME_FS:
-    case Datatype::DATETIME_AS:
-    case Datatype::TIME_HR:
-    case Datatype::TIME_MIN:
-    case Datatype::TIME_SEC:
-    case Datatype::TIME_MS:
-    case Datatype::TIME_US:
-    case Datatype::TIME_NS:
-    case Datatype::TIME_PS:
-    case Datatype::TIME_FS:
-    case Datatype::TIME_AS:
-      return non_overlapping_ranges_for_dim<int64_t>(dim_idx);
-  }
-  return {Status::Ok(), false};
-  ;
 }
 
 template <class T>

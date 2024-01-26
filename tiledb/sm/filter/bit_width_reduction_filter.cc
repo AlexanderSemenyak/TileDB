@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2022 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2024 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -41,8 +41,7 @@
 
 using namespace tiledb::common;
 
-namespace tiledb {
-namespace sm {
+namespace tiledb::sm {
 
 /** Compute the number of bits required to represent a signed integral value. */
 template <typename T>
@@ -100,7 +99,7 @@ void BitWidthReductionFilter::dump(FILE* out) const {
 
 bool BitWidthReductionFilter::accepts_input_datatype(Datatype datatype) const {
   if (datatype_is_integer(datatype) || datatype_is_datetime(datatype) ||
-      datatype_is_time(datatype) || datatype_is_string(datatype)) {
+      datatype_is_time(datatype) || datatype_is_byte(datatype)) {
     return true;
   }
   return false;
@@ -113,29 +112,7 @@ Status BitWidthReductionFilter::run_forward(
     FilterBuffer* input,
     FilterBuffer* output_metadata,
     FilterBuffer* output) const {
-  auto data_type_size = static_cast<uint8_t>(datatype_size(filter_data_type_));
-
-  // If bit width compression can't work, just return the input unmodified.
-  if ((!datatype_is_integer(filter_data_type_) &&
-       filter_data_type_ != Datatype::BLOB) ||
-      data_type_size == 1) {
-    RETURN_NOT_OK(output->append_view(input));
-    RETURN_NOT_OK(output_metadata->append_view(input_metadata));
-    return Status::Ok();
-  }
-
-  /* Note: Arithmetic operations cannot be performed on std::byte.
-    We will use uint8_t for the Datatype::BLOB case as it is the same size as
-    std::byte and can have arithmetic performed on it. */
   switch (filter_data_type_) {
-    case Datatype::INT8:
-      return run_forward<int8_t>(
-          tile, offsets_tile, input_metadata, input, output_metadata, output);
-    case Datatype::BLOB:
-    case Datatype::BOOL:
-    case Datatype::UINT8:
-      return run_forward<uint8_t>(
-          tile, offsets_tile, input_metadata, input, output_metadata, output);
     case Datatype::INT16:
       return run_forward<int16_t>(
           tile, offsets_tile, input_metadata, input, output_metadata, output);
@@ -176,11 +153,25 @@ Status BitWidthReductionFilter::run_forward(
     case Datatype::TIME_PS:
     case Datatype::TIME_FS:
     case Datatype::TIME_AS:
+      if (tile.format_version() < 20) {
+        // Return data as-is for backwards compatibility
+        RETURN_NOT_OK(output->append_view(input));
+        RETURN_NOT_OK(output_metadata->append_view(input_metadata));
+        return Status::Ok();
+      }
       return run_forward<int64_t>(
           tile, offsets_tile, input_metadata, input, output_metadata, output);
+    case Datatype::INT8:
+    case Datatype::BLOB:
+    case Datatype::GEOM_WKB:
+    case Datatype::GEOM_WKT:
+    case Datatype::BOOL:
+    case Datatype::UINT8:
     default:
-      return LOG_STATUS(
-          Status_FilterError("Cannot filter; Unsupported input type"));
+      // If bit width compression can't work, just return the input unmodified.
+      RETURN_NOT_OK(output->append_view(input));
+      RETURN_NOT_OK(output_metadata->append_view(input_metadata));
+      return Status::Ok();
   }
 }
 
@@ -295,31 +286,8 @@ Status BitWidthReductionFilter::run_reverse(
     FilterBuffer* input,
     FilterBuffer* output_metadata,
     FilterBuffer* output,
-    const Config& config) const {
-  (void)config;
-  auto data_type_size = static_cast<uint8_t>(datatype_size(filter_data_type_));
-
-  // If bit width compression wasn't applied, just return the input unmodified.
-  if ((!datatype_is_integer(filter_data_type_) &&
-       filter_data_type_ != Datatype::BLOB) ||
-      data_type_size == 1) {
-    RETURN_NOT_OK(output->append_view(input));
-    RETURN_NOT_OK(output_metadata->append_view(input_metadata));
-    return Status::Ok();
-  }
-
-  /* Note: Arithmetic operations cannot be performed on std::byte.
-    We will use uint8_t for the Datatype::BLOB case as it is the same size as
-    std::byte and can have arithmetic perfomed on it. */
+    const Config&) const {
   switch (filter_data_type_) {
-    case Datatype::INT8:
-      return run_reverse<int8_t>(
-          tile, offsets_tile, input_metadata, input, output_metadata, output);
-    case Datatype::BLOB:
-    case Datatype::BOOL:
-    case Datatype::UINT8:
-      return run_reverse<uint8_t>(
-          tile, offsets_tile, input_metadata, input, output_metadata, output);
     case Datatype::INT16:
       return run_reverse<int16_t>(
           tile, offsets_tile, input_metadata, input, output_metadata, output);
@@ -360,11 +328,25 @@ Status BitWidthReductionFilter::run_reverse(
     case Datatype::TIME_PS:
     case Datatype::TIME_FS:
     case Datatype::TIME_AS:
+      if (tile.format_version() < 20) {
+        // Return data as-is for backwards compatibility.
+        RETURN_NOT_OK(output->append_view(input));
+        RETURN_NOT_OK(output_metadata->append_view(input_metadata));
+        return Status::Ok();
+      }
       return run_reverse<int64_t>(
           tile, offsets_tile, input_metadata, input, output_metadata, output);
+    case Datatype::INT8:
+    case Datatype::BLOB:
+    case Datatype::GEOM_WKB:
+    case Datatype::GEOM_WKT:
+    case Datatype::BOOL:
+    case Datatype::UINT8:
     default:
-      return LOG_STATUS(
-          Status_FilterError("Cannot filter; Unsupported input type"));
+      // If bit width compression wasn't applied, return the input unmodified.
+      RETURN_NOT_OK(output->append_view(input));
+      RETURN_NOT_OK(output_metadata->append_view(input_metadata));
+      return Status::Ok();
   }
 }
 
@@ -585,5 +567,4 @@ void BitWidthReductionFilter::serialize_impl(Serializer& serializer) const {
   serializer.write<uint32_t>(max_window_size_);
 }
 
-}  // namespace sm
-}  // namespace tiledb
+}  // namespace tiledb::sm

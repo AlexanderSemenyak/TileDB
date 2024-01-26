@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB Inc.
+ * @copyright Copyright (c) 2017-2023 TileDB Inc.
  * @copyright Copyright (c) 2016 MIT and Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -150,7 +150,6 @@ struct DenseArrayFx {
       const tiledb_layout_t layout,
       std::vector<TestRange>& ranges,
       std::vector<uint64_t>& a1);
-  static std::string random_name(const std::string& prefix);
 
   /**
    * Creates a 2D dense array.
@@ -960,15 +959,15 @@ void DenseArrayFx::write_dense_subarray_2D_with_cancel(
 
 void DenseArrayFx::check_sorted_reads(const std::string& path) {
   // Parameters used in this test
-  int64_t domain_size_0 = 5000;
-  int64_t domain_size_1 = 10000;
-  int64_t tile_extent_0 = 1000;
-  int64_t tile_extent_1 = 1000;
+  int64_t domain_size_0 = 2500;
+  int64_t domain_size_1 = 5000;
+  int64_t tile_extent_0 = 500;
+  int64_t tile_extent_1 = 500;
   int64_t domain_0_lo = 0;
   int64_t domain_0_hi = domain_size_0 - 1;
   int64_t domain_1_lo = 0;
   int64_t domain_1_hi = domain_size_1 - 1;
-  uint64_t capacity = 1000000;
+  uint64_t capacity = 250000;
   tiledb_layout_t cell_order = TILEDB_ROW_MAJOR;
   tiledb_layout_t tile_order = TILEDB_ROW_MAJOR;
   std::string array_name = path + "sorted_reads_array";
@@ -3093,13 +3092,6 @@ void DenseArrayFx::check_non_empty_domain(const std::string& path) {
   CHECK(rc == TILEDB_OK);
   tiledb_array_free(&array);
 };
-
-std::string DenseArrayFx::random_name(const std::string& prefix) {
-  std::stringstream ss;
-  ss << prefix << "-" << std::this_thread::get_id() << "-"
-     << TILEDB_TIMESTAMP_NOW_MS;
-  return ss.str();
-}
 
 TEST_CASE_METHOD(
     DenseArrayFx,

@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2020-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2020-2023 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -29,13 +29,27 @@
  *
  * This file defines some vfs-specific test suite helper functions.
  */
-#include "test/support/src/vfs_helpers.h"
-#include <test/support/tdb_catch.h>
-#include "test/support/src/helpers.h"
+
+// The order of header includes is important here. serialization_wrappers.h
+// must be included before tdb_catch.h or anything that includes tdb_catch.h.
+// This is due to catch2 including Windows.h which defines things that break
+// compiling TileDB.
+//
+// The blank line between serialization_wrappers.h and the other three headers
+// is also important because clang-format will treat these as separate blocks
+// of includes. If they were one block, then clang-format would insist they
+// were sorted which means that serialization_wrappers.h would be included
+// after tdb_catch.h.
 #include "test/support/src/serialization_wrappers.h"
 
-namespace tiledb {
-namespace test {
+#include "test/support/src/helpers.h"
+#include "test/support/src/vfs_helpers.h"
+
+namespace tiledb::test {
+
+tiledb::sm::URI test_dir(const std::string& prefix) {
+  return tiledb::sm::URI(prefix + "tiledb-" + std::to_string(PRNG::get()()));
+}
 
 std::vector<std::unique_ptr<SupportedFs>> vfs_test_get_fs_vec() {
   std::vector<std::unique_ptr<SupportedFs>> fs_vec;
@@ -46,6 +60,7 @@ std::vector<std::unique_ptr<SupportedFs>> vfs_test_get_fs_vec() {
   bool supports_gcs = false;
   get_supported_fs(
       &supports_s3, &supports_hdfs, &supports_azure, &supports_gcs);
+
   if (supports_s3) {
     fs_vec.emplace_back(std::make_unique<SupportedFsS3>());
   }
@@ -64,7 +79,6 @@ std::vector<std::unique_ptr<SupportedFs>> vfs_test_get_fs_vec() {
   }
 
   fs_vec.emplace_back(std::make_unique<SupportedFsLocal>());
-
   fs_vec.emplace_back(std::make_unique<SupportedFsMem>());
 
   return fs_vec;
@@ -403,5 +417,86 @@ std::string TemporaryDirectoryFixture::create_temporary_array(
   return array_uri;
 }
 
-}  // End of namespace test
-}  // End of namespace tiledb
+VFSTestBase::VFSTestBase(
+    const std::vector<size_t>& test_tree, const std::string& prefix)
+    : test_tree_(test_tree)
+    , compute_(4)
+    , io_(4)
+    , vfs_(&tiledb::test::g_helper_stats, &io_, &compute_, create_test_config())
+    , prefix_(prefix)
+    , temp_dir_(tiledb::test::test_dir(prefix_))
+    , is_supported_(vfs_.supports_uri_scheme(temp_dir_)) {
+  // TODO: Throw when we can provide a list of supported filesystems to Catch2.
+}
+
+VFSTestBase::~VFSTestBase() {
+  if (vfs_.supports_uri_scheme(temp_dir_)) {
+    bool is_dir = false;
+    vfs_.is_dir(temp_dir_, &is_dir).ok();
+    if (is_dir) {
+      vfs_.remove_dir(temp_dir_).ok();
+    }
+  }
+}
+
+tiledb::sm::Config VFSTestBase::create_test_config() {
+  tiledb::sm::Config cfg;
+  if constexpr (!tiledb::test::aws_s3_config) {
+    // Set up connection to minio backend emulator.
+    cfg.set("vfs.s3.endpoint_override", "localhost:9999").ok();
+    cfg.set("vfs.s3.scheme", "https").ok();
+    cfg.set("vfs.s3.use_virtual_addressing", "false").ok();
+    cfg.set("vfs.s3.verify_ssl", "false").ok();
+  }
+  cfg.set("vfs.azure.storage_account_name", "devstoreaccount1").ok();
+  cfg.set(
+         "vfs.azure.storage_account_key",
+         "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/"
+         "K1SZFPTOtr/KBHBeksoGMGw==")
+      .ok();
+  cfg.set("vfs.azure.blob_endpoint", "http://127.0.0.1:10000/devstoreaccount1")
+      .ok();
+  return cfg;
+}
+
+VFSTest::VFSTest(
+    const std::vector<size_t>& test_tree, const std::string& prefix)
+    : VFSTestBase(test_tree, prefix) {
+  if (!is_supported()) {
+    return;
+  }
+
+  if (temp_dir_.is_file() || temp_dir_.is_memfs() || temp_dir_.is_hdfs()) {
+    vfs_.create_dir(temp_dir_).ok();
+  } else {
+    vfs_.create_bucket(temp_dir_).ok();
+  }
+  for (size_t i = 1; i <= test_tree_.size(); i++) {
+    sm::URI path = temp_dir_.join_path("subdir_" + std::to_string(i));
+    // VFS::create_dir is a no-op for S3.
+    vfs_.create_dir(path).ok();
+    for (size_t j = 1; j <= test_tree_[i - 1]; j++) {
+      auto object_uri = path.join_path("test_file_" + std::to_string(j));
+      vfs_.touch(object_uri).ok();
+      std::string data(j * 10, 'a');
+      vfs_.open_file(object_uri, sm::VFSMode::VFS_WRITE).ok();
+      vfs_.write(object_uri, data.data(), data.size()).ok();
+      vfs_.close_file(object_uri).ok();
+      expected_results().emplace_back(object_uri.to_string(), data.size());
+    }
+  }
+  std::sort(expected_results().begin(), expected_results().end());
+}
+
+LocalFsTest::LocalFsTest(const std::vector<size_t>& test_tree)
+    : VFSTestBase(test_tree, "file://") {
+#ifdef _WIN32
+  temp_dir_ =
+      tiledb::test::test_dir(prefix_ + tiledb::sm::Win::current_dir() + "/");
+#else
+  temp_dir_ =
+      tiledb::test::test_dir(prefix_ + tiledb::sm::Posix::current_dir() + "/");
+#endif
+}
+
+}  // namespace tiledb::test

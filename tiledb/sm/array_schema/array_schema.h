@@ -42,7 +42,6 @@
 #include "tiledb/sm/filter/filter_pipeline.h"
 #include "tiledb/sm/misc/constants.h"
 #include "tiledb/sm/misc/hilbert.h"
-#include "tiledb/sm/misc/uuid.h"
 #include "tiledb/sm/storage_manager/context_resources.h"
 
 using namespace tiledb::common;
@@ -97,44 +96,6 @@ class ArraySchema {
 
   /** Constructor. */
   ArraySchema(ArrayType array_type);
-
-  /** Constructor.
-   * @param uri The URI of the array schema file.
-   * @param version The format version of this array schema.
-   * @param timestamp_range The timestamp the array schema was written.
-   * @param name The file name of the schema in timestamp_timestamp_uuid format.
-   * @param array_type The array type.
-   * @param allows_dups True if the (sparse) array allows coordinate duplicates.
-   * @param domain The array domain.
-   * @param cell_order The cell order.
-   * @param tile_order The tile order.
-   * @param capacity The tile capacity for the case of sparse fragments.
-   * @param attributes The array attributes.
-   * @param dimension_labels The array dimension labels.
-   * @param enumeration_path_map The array enumeration path map
-   * @param cell_var_offsets_filters
-   *    The filter pipeline run on offset tiles for var-length attributes.
-   * @param cell_validity_filters
-   *    The filter pipeline run on validity tiles for nullable attributes.
-   * @param coords_filters The filter pipeline run on coordinate tiles.
-   **/
-  ArraySchema(
-      URI uri,
-      uint32_t version,
-      std::pair<uint64_t, uint64_t> timestamp_range,
-      std::string name,
-      ArrayType array_type,
-      bool allows_dups,
-      shared_ptr<Domain> domain,
-      Layout cell_order,
-      Layout tile_order,
-      uint64_t capacity,
-      std::vector<shared_ptr<const Attribute>> attributes,
-      std::vector<shared_ptr<const DimensionLabel>> dimension_labels,
-      std::unordered_map<std::string, std::string> enumeration_path_map,
-      FilterPipeline cell_var_offsets_filters,
-      FilterPipeline cell_validity_filters,
-      FilterPipeline coords_filters);
 
   /** Constructor.
    * @param uri The URI of the array schema file.
@@ -266,7 +227,12 @@ class ArraySchema {
    *
    * Throws if validation fails
    */
-  void check() const;
+  void check(const Config& cfg) const;
+
+  /**
+   * Checks the correctness of the array schema without config access.
+   */
+  void check_without_config() const;
 
   /**
    * Throws an error if the provided schema does not match the definition given
@@ -421,6 +387,16 @@ class ArraySchema {
   void add_enumeration(shared_ptr<const Enumeration> enmr);
 
   /**
+   * Extend an Enumeration on this ArraySchema.
+   *
+   * N.B., this method is intended to be called via ArraySchemaEvolution.
+   * Calling it from anywhere else is likely incorrect.
+   *
+   * @param enmr The extended enumeration.
+   */
+  void extend_enumeration(shared_ptr<const Enumeration> enmr);
+
+  /**
    * Check if an enumeration exists with the given name.
    *
    * @param enmr_name The name to check
@@ -461,7 +437,7 @@ class ArraySchema {
   bool is_enumeration_loaded(const std::string& enumeration_name) const;
 
   /**
-   * Get an Enumeration by name. Throws if the attribute is unknown.
+   * Get an Enumeration by name. Throws if the enumeration is unknown.
    *
    * @param enmr_name The name of the Enumeration.
    * @return shared_ptr<Enumeration>
@@ -470,7 +446,7 @@ class ArraySchema {
       const std::string& enmr_name) const;
 
   /**
-   * Get an Enumeration's object name. Throws if the attribute is unknown.
+   * Get an Enumeration's object name. Throws if the enumeration is unknown.
    *
    * @param enmr_name The name of the Enumeration.
    * @return The path name of the enumeration on disk
@@ -570,7 +546,7 @@ class ArraySchema {
   format_version_t version() const;
 
   /** Set a timestamp range for the array schema */
-  Status set_timestamp_range(
+  void set_timestamp_range(
       const std::pair<uint64_t, uint64_t>& timestamp_range);
 
   /** Returns the timestamp range. */
@@ -588,11 +564,10 @@ class ArraySchema {
   /** Set the schema name. */
   void set_name(const std::string& name);
 
-  /** Generates a new array schema URI. */
-  Status generate_uri();
-
-  /** Generates a new array schema URI with specified timestamp range. */
-  Status generate_uri(const std::pair<uint64_t, uint64_t>& timestamp_range);
+  /** Generates a new array schema URI with optional timestamp range. */
+  void generate_uri(
+      std::optional<std::pair<uint64_t, uint64_t>> timestamp_range =
+          std::nullopt);
 
  private:
   /* ********************************* */
@@ -739,8 +714,8 @@ class ArraySchema {
 
   void check_webp_filter() const;
 
-  // Check whether attributes referencing enumerations are valid.
-  void check_enumerations() const;
+  // Check enumeration sizes are below the configured maximums.
+  void check_enumerations(const Config& cfg) const;
 
   /** Clears all members. Use with caution! */
   void clear();

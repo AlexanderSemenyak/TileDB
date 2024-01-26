@@ -42,7 +42,7 @@
 #include "tiledb/sm/subarray/subarray.h"
 
 #ifdef TILEDB_SERIALIZATION
-#include "tiledb/sm/serialization/tiledb-rest.h"
+#include "tiledb/sm/serialization/tiledb-rest.capnp.h"
 #endif
 
 using namespace tiledb::common;
@@ -265,6 +265,18 @@ void ordered_dim_label_reader_from_capnp(
     Query* query,
     OrderedDimLabelReader* reader,
     ThreadPool* compute_tp);
+
+Status query_to_capnp(
+    Query& query, capnp::Query::Builder* query_builder, const bool client_side);
+
+Status query_from_capnp(
+    const capnp::Query::Reader& query_reader,
+    const SerializationContext context,
+    void* buffer_start,
+    CopyState* const copy_state,
+    Query* const query,
+    ThreadPool* compute_tp,
+    const bool allocate_buffers);
 
 #endif
 

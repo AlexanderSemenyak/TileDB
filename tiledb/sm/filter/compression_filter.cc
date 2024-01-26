@@ -310,9 +310,7 @@ Status CompressionFilter::run_reverse(
     FilterBuffer* input,
     FilterBuffer* output_metadata,
     FilterBuffer* output,
-    const Config& config) const {
-  (void)config;
-
+    const Config&) const {
   // Easy case: no compression
   if (compressor_ == Compressor::NO_COMPRESSION) {
     RETURN_NOT_OK(output->append_view(input));
@@ -495,8 +493,8 @@ tuple<std::vector<std::string_view>, uint64_t>
 CompressionFilter::create_input_view(
     const FilterBuffer& input, WriterTile* const offsets_tile) {
   auto input_buf = static_cast<const char*>(input.buffers()[0].data());
-  auto offsets_data = static_cast<uint64_t*>(offsets_tile->data());
-  auto offsets_size = offsets_tile->size() / constants::cell_var_offset_size;
+  auto offsets_data = offsets_tile->data_as<offsets_t>();
+  auto offsets_size = offsets_tile->size_as<offsets_t>();
   std::vector<std::string_view> input_view(offsets_size);
 
   size_t i = 0;
@@ -557,12 +555,13 @@ Status CompressionFilter::compress_var_string_coords(
     output_size_ub = num_of_runs * (rle_len_bytesize + string_len_bytesize) +
                      output_strings_size;
   } else if (compressor_ == Compressor::DICTIONARY_ENCODING) {
-    auto num_strings = offsets_tile->size() / constants::cell_var_offset_size;
+    auto num_strings = offsets_tile->size_as<offsets_t>();
     max_id_bytesize = compute_bytesize(num_strings);
     max_strlen_bytesize = compute_bytesize(max_string_len);
     // Allocate for worst case dict_size when all strings unique, in format:
     // [num_of_strings|size_str1|str1|...|size_strN|strN]
-    dict_size = max_strlen_bytesize * num_strings + input.size();
+    dict_size =
+        max_strlen_bytesize * static_cast<uint32_t>(num_strings) + input.size();
     // Extra metadata bytes to store the dictionary and string length datasize,
     // id size, and dict size
     metadata_size += 2 * sizeof(uint8_t) + sizeof(uint32_t) + dict_size;
@@ -640,8 +639,7 @@ Status CompressionFilter::decompress_var_string_coords(
   auto output_view = span<std::byte>(
       reinterpret_cast<std::byte*>(output_buffer->data()), uncompressed_size);
   auto offsets_view = span<uint64_t>(
-      reinterpret_cast<std::uint64_t*>(offsets_tile->data()),
-      uncompressed_offsets_size);
+      offsets_tile->data_as<offsets_t>(), uncompressed_offsets_size);
 
   if (compressor_ == Compressor::RLE) {
     uint8_t rle_len_bytesize, string_len_bytesize;

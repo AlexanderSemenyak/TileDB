@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2021 TileDB Inc.
+ * @copyright Copyright (c) 2021-2024 TileDB Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -77,7 +77,6 @@ struct Attributesfx {
       const std::string& path,
       const std::string& attr_name,
       tiledb_datatype_t attr_type);
-  static std::string random_name(const std::string& prefix);
 };
 
 Attributesfx::Attributesfx()
@@ -103,13 +102,6 @@ void Attributesfx::remove_temp_dir(const std::string& path) {
   REQUIRE(tiledb_vfs_is_dir(ctx_, vfs_, path.c_str(), &is_dir) == TILEDB_OK);
   if (is_dir)
     REQUIRE(tiledb_vfs_remove_dir(ctx_, vfs_, path.c_str()) == TILEDB_OK);
-}
-
-std::string Attributesfx::random_name(const std::string& prefix) {
-  std::stringstream ss;
-  ss << prefix << "-" << std::this_thread::get_id() << "-"
-     << TILEDB_TIMESTAMP_NOW_MS;
-  return ss.str();
 }
 
 void Attributesfx::create_dense_vector(
@@ -294,8 +286,10 @@ TEST_CASE_METHOD(
 
 TEST_CASE_METHOD(
     Attributesfx,
-    "C API: Test attributes with tiledb_blob datatype",
-    "[capi][attributes][tiledb_blob]") {
+    "C API: Test attributes with std::byte",
+    "[capi][attributes][byte]") {
+  auto datatype = GENERATE(TILEDB_BLOB, TILEDB_GEOM_WKB, TILEDB_GEOM_WKT);
+
   SECTION("no serialization") {
     serialize_ = false;
   }
@@ -314,7 +308,7 @@ TEST_CASE_METHOD(
       continue;
     }
 
-    std::string attr_name = "attr";
+    std::string attr_name = "a";
 
     // Create new TileDB context with file lock config disabled, rest the
     // same.
@@ -332,7 +326,7 @@ TEST_CASE_METHOD(
 
     create_temp_dir(temp_dir);
 
-    create_dense_vector(array_name, attr_name, TILEDB_BLOB);
+    create_dense_vector(array_name, attr_name, datatype);
 
     // Prepare cell buffers
     uint8_t buffer_write[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
@@ -391,6 +385,7 @@ TEST_CASE_METHOD(
     rc = tiledb_query_set_data_buffer(
         ctx_, query, attr_name.c_str(), buffer_read, &buffer_read_size);
     CHECK(rc == TILEDB_OK);
+
     rc = submit_query_wrapper(
         ctx_,
         array_name,

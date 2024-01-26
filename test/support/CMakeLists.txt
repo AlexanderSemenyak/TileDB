@@ -4,7 +4,7 @@
 #
 # The MIT License
 #
-# Copyright (c) 2022 TileDB, Inc.
+# Copyright (c) 2022-2023 TileDB, Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -42,6 +42,7 @@ set(TILEDB_TEST_SUPPORT_SOURCES
   src/helpers.cc
   src/helpers-dimension.h
   src/serialization_wrappers.cc
+  src/temporary_local_directory.cc
   src/vfs_helpers.cc
   )
 
@@ -49,7 +50,7 @@ if (TILEDB_VERBOSE)
   add_definitions(-DTILEDB_VERBOSE)
 endif()
 
-add_library(tiledb_test_support_lib EXCLUDE_FROM_ALL
+add_library(tiledb_test_support_lib STATIC EXCLUDE_FROM_ALL
   $<TARGET_OBJECTS:TILEDB_CORE_OBJECTS>
   ${TILEDB_TEST_SUPPORT_SOURCES}
 )
@@ -86,7 +87,7 @@ if (TILEDB_SERIALIZATION)
   target_compile_definitions(tiledb_test_support_lib PRIVATE -DTILEDB_SERIALIZATION)
 endif()
 
-target_compile_definitions(tiledb_test_support_lib PRIVATE -DTILEDB_CORE_OBJECTS_EXPORTS)
+target_compile_definitions(tiledb_test_support_lib PRIVATE -Dtiledb_EXPORTS)
 
 target_compile_definitions(tiledb_test_support_lib PRIVATE
   -DTILEDB_TEST_INPUTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../inputs"
@@ -97,3 +98,15 @@ target_link_libraries(tiledb_test_support_lib
     TILEDB_CORE_OBJECTS_ILIB
     Catch2::Catch2
 )
+
+# tdb_catch object library
+include(common NO_POLICY_SCOPE)
+include(object_library)
+
+commence(object_library tdb_catch)
+  this_target_sources(tdb_catch_prng.cc)
+  this_target_link_libraries(Catch2::Catch2)
+  this_target_object_libraries(seedable_global_PRNG)
+conclude(object_library)
+
+add_test_subdirectory()

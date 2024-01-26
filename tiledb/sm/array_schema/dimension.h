@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2024 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -56,8 +56,7 @@ namespace tiledb::type {
 class Range;
 }
 
-namespace tiledb {
-namespace sm {
+namespace tiledb::sm {
 
 class Buffer;
 class ConstBuffer;
@@ -70,9 +69,9 @@ enum class Datatype : uint8_t;
  *
  * Note: as laid out in the Storage Format,
  * the following Datatypes are not valid for Dimension:
- * TILEDB_CHAR, TILEDB_BLOB, TILEDB_BOOL, TILEDB_STRING_UTF8,
- * TILEDB_STRING_UTF16, TILEDB_STRING_UTF32, TILEDB_STRING_UCS2,
- * TILEDB_STRING_UCS4, TILEDB_ANY
+ * TILEDB_CHAR, TILEDB_BLOB, TILEDB_GEOM_WKB, TILEDB_GEOM_WKT, TILEDB_BOOL,
+ * TILEDB_STRING_UTF8, TILEDB_STRING_UTF16, TILEDB_STRING_UTF32,
+ * TILEDB_STRING_UCS2, TILEDB_STRING_UCS4, TILEDB_ANY
  */
 class Dimension {
  public:
@@ -156,12 +155,16 @@ class Dimension {
    * Populates the object members from the data in the input binary buffer.
    *
    * @param deserializer The deserializer to deserialize from.
-   * @param type The type of the dimension.
    * @param version The array schema version.
+   * @param type The type of the dimension.
+   * @param coords_filters Coords filters to replace empty coords pipelines.
    * @return Dimension
    */
   static shared_ptr<Dimension> deserialize(
-      Deserializer& deserializer, uint32_t version, Datatype type);
+      Deserializer& deserializer,
+      uint32_t version,
+      Datatype type,
+      FilterPipeline& coords_filters);
 
   /** Returns the domain. */
   const Range& domain() const;
@@ -1081,8 +1084,7 @@ class Dimension {
   void set_smaller_than_func();
 };
 
-}  // namespace sm
-}  // namespace tiledb
+}  // namespace tiledb::sm
 
 namespace tiledb::common {
 template <>

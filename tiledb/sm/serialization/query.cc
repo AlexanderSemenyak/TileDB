@@ -41,6 +41,7 @@
 #include "tiledb/sm/serialization/array.h"
 #include "tiledb/sm/serialization/array_schema.h"
 #include "tiledb/sm/serialization/capnp_utils.h"
+#include "tiledb/sm/serialization/query_aggregates.h"
 #endif
 // clang-format on
 
@@ -73,7 +74,7 @@
 #include "tiledb/sm/serialization/config.h"
 #include "tiledb/sm/serialization/fragment_metadata.h"
 #include "tiledb/sm/serialization/query.h"
-#include "tiledb/sm/storage_manager/storage_manager_declaration.h"
+#include "tiledb/sm/storage_manager/storage_manager.h"
 #include "tiledb/sm/subarray/subarray_partitioner.h"
 
 using namespace tiledb::common;
@@ -766,16 +767,28 @@ static Status condition_ast_to_capnp(
     ensure_qc_field_name_is_valid(field_name);
     ast_builder->setFieldName(field_name);
 
-    // Copy the condition value into a capnp vector of bytes.
-    const UntypedDatumView& value = node->get_condition_value_view();
-    auto capnpValue = kj::Vector<uint8_t>();
-    capnpValue.addAll(kj::ArrayPtr<uint8_t>(
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.content())),
-        value.size()));
+    // Copy the condition data into a capnp vector of bytes.
+    auto& data = node->get_data();
+    auto capnpData = kj::Vector<uint8_t>();
+    capnpData.addAll(
+        kj::ArrayPtr<uint8_t>(const_cast<uint8_t*>(data.data()), data.size()));
 
     // Validate and store the condition value vector of bytes.
-    ensure_qc_capnp_condition_value_is_valid(capnpValue);
-    ast_builder->setValue(capnpValue.asPtr());
+    ensure_qc_capnp_condition_value_is_valid(capnpData);
+    ast_builder->setValue(capnpData.asPtr());
+
+    if (node->get_op() == QueryConditionOp::IN ||
+        node->get_op() == QueryConditionOp::NOT_IN) {
+      // Copy the condition offsets into a capnp vector of bytes
+      auto& offsets = node->get_offsets();
+      auto capnpOffsets = kj::Vector<uint8_t>();
+      capnpOffsets.addAll(kj::ArrayPtr<uint8_t>(
+          const_cast<uint8_t*>(offsets.data()), offsets.size()));
+
+      // Validate and store the condition value offsets
+      ensure_qc_capnp_condition_value_is_valid(capnpOffsets);
+      ast_builder->setOffsets(capnpOffsets.asPtr());
+    }
 
     // Validate and store the query condition op.
     const std::string op_str = query_condition_op_str(node->get_op());
@@ -817,15 +830,14 @@ static void clause_to_capnp(
   clause_builder->setFieldName(field_name);
 
   // Copy the condition value into a capnp vector of bytes.
-  const UntypedDatumView& value = node->get_condition_value_view();
-  auto capnpValue = kj::Vector<uint8_t>();
-  capnpValue.addAll(kj::ArrayPtr<uint8_t>(
-      const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.content())),
-      value.size()));
+  auto& data = node->get_data();
+  auto capnpData = kj::Vector<uint8_t>();
+  capnpData.addAll(
+      kj::ArrayPtr<uint8_t>(const_cast<uint8_t*>(data.data()), data.size()));
 
   // Validate and store the condition value vector of bytes.
-  ensure_qc_capnp_condition_value_is_valid(capnpValue);
-  clause_builder->setValue(capnpValue.asPtr());
+  ensure_qc_capnp_condition_value_is_valid(capnpData);
+  clause_builder->setValue(capnpData.asPtr());
 
   // Validate and store the query condition op.
   const std::string op_str = query_condition_op_str(node->get_op());
@@ -997,6 +1009,16 @@ tdb_unique_ptr<ASTNode> condition_ast_from_capnp(
     size_t size = condition_value.size();
     ensure_qc_condition_value_is_valid(data, size);
 
+    // Getting and validating the condition offsets.
+    const void* offsets = nullptr;
+    size_t offsets_size = 0;
+    if (ast_reader.hasOffsets()) {
+      auto condition_offsets = ast_reader.getOffsets();
+      offsets = static_cast<const void*>(condition_offsets.asBytes().begin());
+      offsets_size = condition_offsets.size();
+      ensure_qc_condition_value_is_valid(offsets, offsets_size);
+    }
+
     // Getting and validating the query condition operator.
     QueryConditionOp op = QueryConditionOp::LT;
     Status s = query_condition_op_enum(ast_reader.getOp(), &op);
@@ -1007,6 +1029,18 @@ tdb_unique_ptr<ASTNode> condition_ast_from_capnp(
     ensure_qc_op_is_valid(op);
 
     auto use_enumeration = ast_reader.getUseEnumeration();
+
+    if (op == QueryConditionOp::IN || op == QueryConditionOp::NOT_IN) {
+      return tdb_unique_ptr<ASTNode>(tdb_new(
+          ASTNodeVal,
+          field_name,
+          size == 0 ? nullptr : data,
+          size,
+          offsets,
+          offsets_size,
+          op,
+          use_enumeration));
+    }
 
     return tdb_unique_ptr<ASTNode>(
         tdb_new(ASTNodeVal, field_name, data, size, op, use_enumeration));
@@ -1381,6 +1415,17 @@ Status query_to_capnp(
   buffer_names.insert(
       buffer_names.end(), dim_label_names.begin(), dim_label_names.end());
 
+  // Add aggregate buffers
+  const auto aggregate_names = query.aggregate_buffer_names();
+  buffer_names.insert(
+      buffer_names.end(), aggregate_names.begin(), aggregate_names.end());
+
+  // TODO: add API in query to get all buffers in one go
+  // Deserialization gets the list of buffers from wire then call
+  // set_data_buffer which knows on which structure to set. We should have a
+  // function here as well that gets all buffer names or even better, all
+  // buffers
+
   uint64_t total_fixed_len_bytes = 0;
   uint64_t total_var_len_bytes = 0;
   uint64_t total_validity_len_bytes = 0;
@@ -1549,6 +1594,16 @@ Status query_to_capnp(
     }
   }
 
+  // The server should throw if it's about to serialize an incomplete query
+  // that has aggregates on it, this behavior is currently not supported.
+  if (!client_side && query.status() == QueryStatus::INCOMPLETE &&
+      !query.has_aggregates()) {
+    throw Status_SerializationError(
+        "Aggregates are not currently supported in incomplete remote "
+        "queries");
+  }
+  query_channels_to_capnp(query, query_builder);
+
   return Status::Ok();
 }
 
@@ -1558,7 +1613,8 @@ Status query_from_capnp(
     void* buffer_start,
     CopyState* const copy_state,
     Query* const query,
-    ThreadPool* compute_tp) {
+    ThreadPool* compute_tp,
+    const bool allocate_buffers) {
   using namespace tiledb::sm;
 
   auto array = query->array();
@@ -1621,6 +1677,11 @@ Status query_from_capnp(
     }
   }
 
+  // It's important that deserialization of query channels/aggregates happens
+  // before deserializing buffers. set_data_buffer won't know whether a buffer
+  // is aggregate or not if the list of aggregates per channel is not populated.
+  query_channels_from_capnp(query_reader, query);
+
   const auto& schema = query->array_schema();
   // Deserialize and set attribute buffers.
   if (!query_reader.hasAttributeBufferHeaders()) {
@@ -1653,8 +1714,19 @@ Status query_from_capnp(
     uint8_t* existing_validity_buffer = nullptr;
     uint64_t existing_validity_buffer_size = 0;
 
-    auto var_size = schema.var_size(name);
-    auto nullable = schema.is_nullable(name);
+    // TODO: This is yet another instance where there needs to be a common
+    // mechanism for reporting the common properties of a field.
+    // Refactor to use query_field_t.
+    bool var_size = false;
+    bool nullable = false;
+    auto aggregate = query->get_aggregate(name);
+    if (aggregate.has_value()) {
+      var_size = aggregate.value()->aggregation_var_sized();
+      nullable = aggregate.value()->aggregation_nullable();
+    } else {
+      var_size = schema.var_size(name);
+      nullable = schema.is_nullable(name);
+    }
     const QueryBuffer& query_buffer = query->buffer(name);
     if (type == QueryType::READ) {
       // We use the query_buffer directly in order to get the original buffer
@@ -1938,6 +2010,15 @@ Status query_from_capnp(
         Buffer offsets_buff(nullptr, fixedlen_size);
         Buffer varlen_buff(nullptr, varlen_size);
         Buffer validitylen_buff(nullptr, validitylen_size);
+
+        // Aggregates don't have incomplete queries, and only set the results on
+        // completion, so we don't need to have go allocate memory.
+        if (query->is_aggregate(name)) {
+          offsets_buff = Buffer(fixedlen_size);
+          varlen_buff = Buffer(fixedlen_size);
+          validitylen_buff = Buffer(validitylen_size);
+        }
+
         // For the server on reads we want to set the original user requested
         // buffer sizes This handles the case of incomplete queries where on
         // the second `submit()` call the client's buffer size will be the
@@ -1973,19 +2054,39 @@ Status query_from_capnp(
         attr_state->validity_len_data.swap(validitylen_buff);
         if (var_size) {
           throw_if_not_ok(query->set_data_buffer(
-              name, nullptr, &attr_state->var_len_size, false, true));
+              name,
+              attr_state->var_len_data.data(),
+              &attr_state->var_len_size,
+              allocate_buffers,
+              true));
           throw_if_not_ok(query->set_offsets_buffer(
-              name, nullptr, &attr_state->fixed_len_size, false, true));
+              name,
+              attr_state->fixed_len_data.data_as<uint64_t>(),
+              &attr_state->fixed_len_size,
+              allocate_buffers,
+              true));
           if (nullable) {
             throw_if_not_ok(query->set_validity_buffer(
-                name, nullptr, &attr_state->validity_len_size, false, true));
+                name,
+                attr_state->validity_len_data.data_as<uint8_t>(),
+                &attr_state->validity_len_size,
+                allocate_buffers,
+                true));
           }
         } else {
           throw_if_not_ok(query->set_data_buffer(
-              name, nullptr, &attr_state->fixed_len_size, false, true));
+              name,
+              attr_state->fixed_len_data.data(),
+              &attr_state->fixed_len_size,
+              allocate_buffers,
+              true));
           if (nullable) {
             throw_if_not_ok(query->set_validity_buffer(
-                name, nullptr, &attr_state->validity_len_size, false, true));
+                name,
+                attr_state->validity_len_data.data_as<uint8_t>(),
+                &attr_state->validity_len_size,
+                allocate_buffers,
+                true));
           }
         }
       } else if (query_type == QueryType::WRITE) {
@@ -2014,12 +2115,24 @@ Status query_from_capnp(
           attr_state->validity_len_data.swap(validity_buff);
 
           throw_if_not_ok(query->set_data_buffer(
-              name, varlen_data, &attr_state->var_len_size, true, true));
+              name,
+              varlen_data,
+              &attr_state->var_len_size,
+              allocate_buffers,
+              true));
           throw_if_not_ok(query->set_offsets_buffer(
-              name, offsets, &attr_state->fixed_len_size, true, true));
+              name,
+              offsets,
+              &attr_state->fixed_len_size,
+              allocate_buffers,
+              true));
           if (nullable) {
             throw_if_not_ok(query->set_validity_buffer(
-                name, validity, &attr_state->validity_len_size, true, true));
+                name,
+                validity,
+                &attr_state->validity_len_size,
+                allocate_buffers,
+                true));
           }
         } else {
           auto* data = attribute_buffer_start;
@@ -2042,10 +2155,14 @@ Status query_from_capnp(
           attr_state->validity_len_data.swap(validity_buff);
 
           throw_if_not_ok(query->set_data_buffer(
-              name, data, &attr_state->fixed_len_size, true, true));
+              name, data, &attr_state->fixed_len_size, allocate_buffers, true));
           if (nullable) {
             throw_if_not_ok(query->set_validity_buffer(
-                name, validity, &attr_state->validity_len_size, true, true));
+                name,
+                validity,
+                &attr_state->validity_len_size,
+                allocate_buffers,
+                true));
           }
         }
       } else {
@@ -2239,9 +2356,14 @@ Status array_from_query_deserialize(
           return LOG_STATUS(Status_SerializationError(
               "Could not deserialize query; buffer is not 8-byte aligned."));
 
-        // Set traversal limit to 10GI (TODO: make this a config option)
+        // Set traversal limit from config
+        uint64_t limit = storage_manager->config()
+                             .get<uint64_t>("rest.capnp_traversal_limit")
+                             .value();
         ::capnp::ReaderOptions readerOptions;
-        readerOptions.traversalLimitInWords = uint64_t(1024) * 1024 * 1024 * 10;
+        // capnp uses the limit in words
+        readerOptions.traversalLimitInWords = limit / sizeof(::capnp::word);
+
         ::capnp::FlatArrayMessageReader reader(
             kj::arrayPtr(
                 reinterpret_cast<const ::capnp::word*>(
@@ -2433,7 +2555,8 @@ Status do_query_deserialize(
     const SerializationContext context,
     CopyState* const copy_state,
     Query* query,
-    ThreadPool* compute_tp) {
+    ThreadPool* compute_tp,
+    const bool allocate_buffers) {
   if (serialize_type == SerializationType::JSON)
     return LOG_STATUS(Status_SerializationError(
         "Cannot deserialize query; json format not supported."));
@@ -2451,7 +2574,13 @@ Status do_query_deserialize(
             query_builder);
         capnp::Query::Reader query_reader = query_builder.asReader();
         return query_from_capnp(
-            query_reader, context, nullptr, copy_state, query, compute_tp);
+            query_reader,
+            context,
+            nullptr,
+            copy_state,
+            query,
+            compute_tp,
+            allocate_buffers);
       }
       case SerializationType::CAPNP: {
         // Capnp FlatArrayMessageReader requires 64-bit alignment.
@@ -2459,9 +2588,13 @@ Status do_query_deserialize(
           return LOG_STATUS(Status_SerializationError(
               "Could not deserialize query; buffer is not 8-byte aligned."));
 
-        // Set traversal limit to 10GI (TODO: make this a config option)
+        // Set traversal limit from config
+        uint64_t limit =
+            query->config().get<uint64_t>("rest.capnp_traversal_limit").value();
         ::capnp::ReaderOptions readerOptions;
-        readerOptions.traversalLimitInWords = uint64_t(1024) * 1024 * 1024 * 10;
+        // capnp uses the limit in words
+        readerOptions.traversalLimitInWords = limit / sizeof(::capnp::word);
+
         ::capnp::FlatArrayMessageReader reader(
             kj::arrayPtr(
                 reinterpret_cast<const ::capnp::word*>(
@@ -2477,7 +2610,13 @@ Status do_query_deserialize(
         auto attribute_buffer_start = reader.getEnd();
         auto buffer_start = const_cast<::capnp::word*>(attribute_buffer_start);
         return query_from_capnp(
-            query_reader, context, buffer_start, copy_state, query, compute_tp);
+            query_reader,
+            context,
+            buffer_start,
+            copy_state,
+            query,
+            compute_tp,
+            allocate_buffers);
       }
       default:
         return LOG_STATUS(Status_SerializationError(
@@ -2519,6 +2658,7 @@ Status query_deserialize(
     original_copy_state =
         tdb_unique_ptr<CopyState>(tdb_new(CopyState, *copy_state));
   }
+  auto allocate_buffers = query->type() == QueryType::WRITE;
 
   // Deserialize 'serialized_buffer'.
   const Status st = do_query_deserialize(
@@ -2527,7 +2667,8 @@ Status query_deserialize(
       clientside ? SerializationContext::CLIENT : SerializationContext::SERVER,
       copy_state,
       query,
-      compute_tp);
+      compute_tp,
+      allocate_buffers);
 
   // If the deserialization failed, deserialize 'original_buffer'
   // into 'query' to ensure that 'query' is in the state it was before the
@@ -2545,7 +2686,8 @@ Status query_deserialize(
         SerializationContext::BACKUP,
         copy_state,
         query,
-        compute_tp);
+        compute_tp,
+        allocate_buffers);
     if (!st2.ok()) {
       LOG_ERROR(st2.message());
       return st2;
@@ -2634,9 +2776,8 @@ Status query_est_result_size_reader_from_capnp(
 Status query_est_result_size_serialize(
     Query* query,
     SerializationType serialize_type,
-    bool clientside,
+    bool,
     Buffer* serialized_buffer) {
-  (void)clientside;
   try {
     ::capnp::MallocMessageBuilder message;
     capnp::EstimatedResultSize::Builder est_result_size_builder =
@@ -2686,9 +2827,8 @@ Status query_est_result_size_serialize(
 Status query_est_result_size_deserialize(
     Query* query,
     SerializationType serialize_type,
-    bool clientside,
+    bool,
     const Buffer& serialized_buffer) {
-  (void)clientside;
   try {
     switch (serialize_type) {
       case SerializationType::JSON: {
@@ -2760,6 +2900,7 @@ Status global_write_state_to_capnp(
   if (write_state.frag_meta_) {
     auto frag_meta = write_state.frag_meta_;
     auto frag_meta_builder = state_builder->initFragMeta();
+    fragment_meta_sizes_offsets_to_capnp(*frag_meta, &frag_meta_builder);
     RETURN_NOT_OK(fragment_metadata_to_capnp(*frag_meta, &frag_meta_builder));
   }
 
@@ -2980,6 +3121,7 @@ Status unordered_write_state_to_capnp(
   auto frag_meta = unordered_writer.frag_meta();
   if (frag_meta != nullptr) {
     auto frag_meta_builder = state_builder->initFragMeta();
+    fragment_meta_sizes_offsets_to_capnp(*frag_meta, &frag_meta_builder);
     RETURN_NOT_OK(fragment_metadata_to_capnp(*frag_meta, &frag_meta_builder));
   }
 

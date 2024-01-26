@@ -69,6 +69,7 @@ namespace sm {
 
 class Array;
 class ArraySchema;
+class OpenedArray;
 class DimensionLabel;
 class EncryptionKey;
 class FragIdx;
@@ -248,6 +249,26 @@ class Subarray {
       StorageManager* storage_manager = nullptr);
 
   /**
+   * Constructor.
+   *
+   * @param opened_array The opened array the subarray is associated with.
+   * @param layout The layout of the values of the subarray (of the results
+   *     if the subarray is used for reads, or of the values provided
+   *     by the user for writes).
+   * @param parent_stats The parent stats to inherit from.
+   * @param logger The parent logger to clone and use for logging
+   * @param coalesce_ranges When enabled, ranges will attempt to coalesce
+   *     with existing ranges as they are added.
+   */
+  Subarray(
+      const shared_ptr<OpenedArray> opened_array,
+      Layout layout,
+      stats::Stats* parent_stats,
+      shared_ptr<Logger> logger,
+      bool coalesce_ranges = true,
+      StorageManager* storage_manager = nullptr);
+
+  /**
    * Copy constructor. This performs a deep copy (including memcpy of
    * underlying buffers).
    */
@@ -273,7 +294,7 @@ class Subarray {
   /* ********************************* */
 
   /** Sets config for query-level parameters only. */
-  void set_config(const Config& config);
+  void set_config(const QueryType query_type, const Config& config);
 
   /**
    * Get the config of the writer
@@ -593,8 +614,8 @@ class Subarray {
       void* start,
       void* end) const;
 
-  /** Returns the array the subarray is associated with. */
-  const Array* array() const;
+  /** Returns the opened array the subarray is associated with. */
+  const shared_ptr<OpenedArray> array() const;
 
   /**
    * Returns the number of cells in the subarray.
@@ -1351,6 +1372,29 @@ class Subarray {
     RangeSetAndSuperset ranges_;
   };
 
+  /**
+   * A hash function capable of hashing std::vector<uint8_t> for use by
+   * the tile_coords_map_ unordered_map for caching coords indices.
+   */
+  struct CoordsHasher {
+    /**
+     * Compute a hash value of the provided key.
+     *
+     * @param key The uint8_t vector to hash.
+     * @return std::size_t The hash value.
+     */
+    std::size_t operator()(const std::vector<uint8_t>& key) const {
+      // The awkward cast here is because std::string_view doesn't accept
+      // a uint8_t* in its constructor. Since compilers won't let us cast
+      // directly from unsigned to signed, we have to static cast to void*
+      // first.
+      auto data =
+          static_cast<const char*>(static_cast<const void*>(key.data()));
+      std::string_view str_key(data, key.size());
+      return std::hash<std::string_view>()(str_key);
+    }
+  };
+
   /* ********************************* */
   /*         PRIVATE ATTRIBUTES        */
   /* ********************************* */
@@ -1365,7 +1409,7 @@ class Subarray {
   shared_ptr<Logger> logger_;
 
   /** The array the subarray object is associated with. */
-  const Array* array_;
+  shared_ptr<OpenedArray> array_;
 
   /** Stores the estimated result size for each array attribute/dimension. */
   std::unordered_map<std::string, ResultSize> est_result_size_;
@@ -1452,7 +1496,8 @@ class Subarray {
   std::vector<std::vector<uint8_t>> tile_coords_;
 
   /** A map (tile coords) -> (vector element position in `tile_coords_`). */
-  std::map<std::vector<uint8_t>, size_t> tile_coords_map_;
+  std::unordered_map<std::vector<uint8_t>, size_t, CoordsHasher>
+      tile_coords_map_;
 
   /** The config for query-level parameters only. */
   Config config_;
@@ -1574,16 +1619,6 @@ class Subarray {
    */
   Status load_relevant_fragment_tile_var_sizes(
       const std::vector<std::string>& names, ThreadPool* compute_tp) const;
-
-  /**
-   * Determine if ranges for a dimension are non overlapping.
-   *
-   * @param dim_idx dimension index.
-   * @return true if the ranges are non overlapping, false otherwise.
-   */
-  template <typename T>
-  tuple<Status, optional<bool>> non_overlapping_ranges_for_dim(
-      const uint64_t dim_idx);
 
   /**
    * Determine if ranges for a dimension are non overlapping.

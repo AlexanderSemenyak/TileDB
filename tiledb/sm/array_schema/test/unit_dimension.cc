@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2021 TileDB, Inc.
+ * @copyright Copyright (c) 2021-2024 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -135,7 +135,8 @@ TEST_CASE("Dimension: Test deserialize,int32", "[dimension][deserialize]") {
   dim_buffer_offset<int32_t, 36>(p) = tile_extent;
 
   Deserializer deserializer(&serialized_buffer, sizeof(serialized_buffer));
-  auto dim = Dimension::deserialize(deserializer, 10, Datatype::INT32);
+  FilterPipeline fp;
+  auto dim = Dimension::deserialize(deserializer, 10, Datatype::INT32, fp);
 
   // Check name
   CHECK(dim->name() == dimension_name);
@@ -174,7 +175,8 @@ TEST_CASE("Dimension: Test deserialize,string", "[dimension][deserialize]") {
   dim_buffer_offset<uint8_t, 27>(p) = null_tile_extent;
 
   Deserializer deserializer(&serialized_buffer, sizeof(serialized_buffer));
-  auto dim = Dimension::deserialize(deserializer, 10, Datatype::INT32);
+  FilterPipeline fp;
+  auto dim = Dimension::deserialize(deserializer, 10, Datatype::INT32, fp);
   // Check name
   CHECK(dim->name() == dimension_name);
   // Check type
@@ -219,6 +221,8 @@ TEST_CASE("Dimension: Test datatypes", "[dimension][datatypes]") {
     std::vector<Datatype> valid_unsupported_datatypes = {
         Datatype::CHAR,
         Datatype::BLOB,
+        Datatype::GEOM_WKB,
+        Datatype::GEOM_WKT,
         Datatype::BOOL,
         Datatype::STRING_UTF8,
         Datatype::STRING_UTF16,
@@ -239,7 +243,8 @@ TEST_CASE("Dimension: Test datatypes", "[dimension][datatypes]") {
   }
 
   SECTION("- invalid Datatypes") {
-    std::vector<std::underlying_type_t<Datatype>> invalid_datatypes = {42, 100};
+    // Note: Ensure this test is updated each time a new datatype is added.
+    std::vector<std::underlying_type_t<Datatype>> invalid_datatypes = {44, 100};
 
     for (auto type : invalid_datatypes) {
       try {

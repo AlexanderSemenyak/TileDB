@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2023 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -40,15 +40,13 @@
 
 #include "tiledb/common/common.h"
 #include "tiledb/common/heap_memory.h"
-#include "tiledb/common/status.h"
 #include "tiledb/sm/filesystem/uri.h"
 #include "tiledb/sm/tile/tile.h"
 #include "tiledb/storage_format/serialization/serializers.h"
 
 using namespace tiledb::common;
 
-namespace tiledb {
-namespace sm {
+namespace tiledb::sm {
 
 class Buffer;
 class ConstBuffer;
@@ -112,10 +110,10 @@ class Metadata {
   void clear();
 
   /** Retrieves the array metadata URI. */
-  Status get_uri(const URI& array_uri, URI* meta_uri);
+  URI get_uri(const URI& array_uri);
 
   /** Generates a new array metadata URI. */
-  Status generate_uri(const URI& array_uri);
+  void generate_uri(const URI& array_uri);
 
   /**
    * Deserializes the input metadata buffers. Note that the buffers are
@@ -135,9 +133,8 @@ class Metadata {
    * Deletes a metadata item.
    *
    * @param key The key of the metadata to be deleted.
-   * @return Status
    */
-  Status del(const char* key);
+  void del(const char* key);
 
   /**
    * Puts a metadata item as a key-value pair.
@@ -147,9 +144,8 @@ class Metadata {
    * @param value_num The number of items in the value part (they could be more
    *     than one).
    * @param value The metadata value.
-   * @return Status
    */
-  Status put(
+  void put(
       const char* key,
       Datatype value_type,
       uint32_t value_num,
@@ -164,9 +160,8 @@ class Metadata {
    * more than one).
    * @param[out] value The metadata value. It will be `nullptr` if the key does
    *     not exist
-   * @return Status
    */
-  Status get(
+  void get(
       const char* key,
       Datatype* value_type,
       uint32_t* value_num,
@@ -183,9 +178,8 @@ class Metadata {
    * more than one).
    * @param[out] value The metadata value. It will be `nullptr` if the key does
    *     not exist
-   * @return Status
    */
-  Status get(
+  void get(
       uint64_t index,
       const char** key,
       uint32_t* key_len,
@@ -196,16 +190,8 @@ class Metadata {
   /** Returns the number of metadata items. */
   uint64_t num() const;
 
-  /**
-   * Checks if metadata has specified key.
-   *
-   * @param key The metadata key.
-   * @param value_type The datatype of the value.
-   * @param value Set to `1` if the array metadata has a key of the
-   *      given name, else `0`.
-   * @return Status
-   */
-  Status has_key(const char* key, Datatype* value_type, bool* has_key);
+  /** Gets the type of the given metadata or nullopt if it does not exist. */
+  std::optional<Datatype> metadata_type(const char* key);
 
   /**
    * Sets the URIs of the metadata files that have been loaded
@@ -285,7 +271,6 @@ class Metadata {
   void build_metadata_index();
 };
 
-}  // namespace sm
-}  // namespace tiledb
+}  // namespace tiledb::sm
 
 #endif  // TILEDB_METADATA_H

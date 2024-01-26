@@ -96,8 +96,14 @@ class Config {
   /** The default buffer size for curl reads used by REST. */
   static const std::string REST_CURL_BUFFER_SIZE;
 
+  /** CAPNP traversal limit used in the deserialization of messages(MB). */
+  static const std::string REST_CAPNP_TRAVERSAL_LIMIT;
+
   /** The default for Curl's verbose mode used by REST. */
   static const std::string REST_CURL_VERBOSE;
+
+  /** If the array enumerations should be loaded on array open */
+  static const std::string REST_LOAD_ENUMERATIONS_ON_ARRAY_OPEN;
 
   /** If the array metadata should be loaded on array open */
   static const std::string REST_LOAD_METADATA_ON_ARRAY_OPEN;
@@ -263,6 +269,9 @@ class Config {
   /** The buffer size for each attribute used in consolidation. */
   static const std::string SM_CONSOLIDATION_BUFFER_SIZE;
 
+  /** The total buffer size for all attributes during consolidation. */
+  static const std::string SM_CONSOLIDATION_TOTAL_BUFFER_SIZE;
+
   /** The maximum fragment size used in consolidation. */
   static const std::string SM_CONSOLIDATION_MAX_FRAGMENT_SIZE;
 
@@ -368,6 +377,12 @@ class Config {
   /** If `true` the readers might partially load/unload tile offsets. */
   static const std::string SM_PARTIAL_TILE_OFFSETS_LOADING;
 
+  /** The maximum size of a single enumeration. */
+  static const std::string SM_ENUMERATIONS_MAX_SIZE;
+
+  /** The maximum total size for all enumerations in a schema. */
+  static const std::string SM_ENUMERATIONS_MAX_TOTAL_SIZE;
+
   /** Certificate file path. */
   static const std::string SSL_CA_FILE;
 
@@ -397,14 +412,14 @@ class Config {
   /** The default posix permissions for directory creations */
   static const std::string VFS_FILE_POSIX_DIRECTORY_PERMISSIONS;
 
-  /** The default maximum number of parallel file:/// operations. */
-  static const std::string VFS_FILE_MAX_PARALLEL_OPS;
-
   /** The maximum size (in bytes) to read-ahead in the VFS. */
   static const std::string VFS_READ_AHEAD_SIZE;
 
   /** The maximum size (in bytes) of the VFS read-ahead cache . */
   static const std::string VFS_READ_AHEAD_CACHE_SIZE;
+
+  /** The type of read logging to perform in the VFS. */
+  static const std::string VFS_READ_LOGGING_MODE;
 
   /** Azure storage account name. */
   static const std::string VFS_AZURE_STORAGE_ACCOUNT_NAME;
@@ -453,6 +468,9 @@ class Config {
 
   /** GCS request timeout in milliseconds. */
   static const std::string VFS_GCS_REQUEST_TIMEOUT_MS;
+
+  /** GCS maximum buffer size for non-multipart uploads. */
+  static const std::string VFS_GCS_MAX_DIRECT_UPLOAD_SIZE;
 
   /** S3 region. */
   static const std::string VFS_S3_REGION;
@@ -549,6 +567,12 @@ class Config {
 
   /** Force making an unsigned request to s3 (false). */
   static const std::string VFS_S3_NO_SIGN_REQUEST;
+
+  /**
+   * When set to `true`, the S3 SDK uses a handler that ignores SIGPIPE
+   * signals.
+   */
+  static const std::string VFS_S3_INSTALL_SIGPIPE_HANDLER;
 
   /** HDFS default kerb ticket cache path. */
   static const std::string VFS_HDFS_KERB_TICKET_CACHE_PATH;

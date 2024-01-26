@@ -33,27 +33,12 @@
 #ifndef TILEDB_AGGREGATE_BUFFER_H
 #define TILEDB_AGGREGATE_BUFFER_H
 
-#include "tiledb/common/status.h"
-#include "tiledb/sm/enums/layout.h"
+#include "tiledb/common/common.h"
 
-using namespace tiledb::common;
-
-namespace tiledb {
-namespace sm {
-
-class ResultTile;
+namespace tiledb::sm {
 
 class AggregateBuffer {
  public:
-  /* ********************************* */
-  /*       FRIENDS DECLARATIONS        */
-  /* ********************************* */
-
-  /**
-   * Friends with its whitebox testing class.
-   */
-  friend class WhiteboxAggregateBuffer;
-
   /* ********************************* */
   /*     CONSTRUCTORS & DESTRUCTORS    */
   /* ********************************* */
@@ -61,46 +46,33 @@ class AggregateBuffer {
   /**
    * Constructor.
    *
-   * @param name Name of the field for the buffer.
-   * @param var_sized Is the field var sized?
-   * @param nullable Is the field nullable?
    * @param min_cell Min cell position to aggregate.
    * @param max_cell Max cell position to aggregate.
-   * @param cell_num Cell num for the tile.
-   * @param rt Result tile containing the data.
-   */
-  AggregateBuffer(
-      const std::string name,
-      const bool var_sized,
-      const bool nullable,
-      const uint64_t min_cell,
-      const uint64_t max_cell,
-      const uint64_t cell_num,
-      ResultTile& rt);
-
-  /**
-   * Constructor with bitmap.
-   *
-   * @param name Name of the field for the buffer.
-   * @param var_sized Is the field var sized?
-   * @param nullable Is the field nullable?
+   * @param fixed_data Fixed data buffer.
+   * @param var_data Var data buffer.
+   * @param validity_data Validity data buffer.
    * @param count_bitmap Is the bitmap a count bitmap?
-   * @param min_cell Min cell position to aggregate.
-   * @param max_cell Max cell position to aggregate.
-   * @param cell_num Cell num for the tile.
-   * @param rt Result tile containing the data.
    * @param bitmap_data Bitmap data.
+   * @param cell_size Cell size.
    */
   AggregateBuffer(
-      const std::string name,
-      const bool var_sized,
-      const bool nullable,
-      const bool count_bitmap,
       const uint64_t min_cell,
       const uint64_t max_cell,
-      const uint64_t cell_num,
-      ResultTile& rt,
-      void* bitmap_data);
+      const void* fixed_data,
+      const optional<char*> var_data,
+      const optional<uint8_t*> validity_data,
+      const bool count_bitmap,
+      const optional<void*> bitmap_data,
+      const uint64_t cell_size)
+      : min_cell_(min_cell)
+      , max_cell_(max_cell)
+      , fixed_data_(fixed_data)
+      , var_data_(var_data)
+      , validity_data_(validity_data)
+      , count_bitmap_(count_bitmap)
+      , bitmap_data_(bitmap_data)
+      , cell_size_(cell_size) {
+  }
 
   DISABLE_COPY_AND_COPY_ASSIGN(AggregateBuffer);
   DISABLE_MOVE_AND_MOVE_ASSIGN(AggregateBuffer);
@@ -108,22 +80,6 @@ class AggregateBuffer {
   /* ********************************* */
   /*                API                */
   /* ********************************* */
-
-  /** Returns a typed fixed data buffer. */
-  template <class T>
-  const T* fixed_data_as() const {
-    return static_cast<const T*>(fixed_data_);
-  }
-
-  /** Returns the var data. */
-  char* var_data() const {
-    return var_data_.value();
-  }
-
-  /** Returns the validity buffer. */
-  uint8_t* validity_data() const {
-    return validity_data_.value();
-  }
 
   /** Returns if the bitmap is a count bitmap. */
   bool is_count_bitmap() const {
@@ -135,83 +91,68 @@ class AggregateBuffer {
     return bitmap_data_.has_value();
   }
 
-  /** Returns types bitmap data. */
-  template <class BitmapType>
-  BitmapType* bitmap_data_as() const {
-    return static_cast<BitmapType*>(bitmap_data_.value());
-  }
-
-  /** Returns the min cell position to aggregate. */
-  uint64_t min_cell() const {
-    return min_cell_;
-  }
-
-  /** Returns the max cell position to aggregate. */
-  uint64_t max_cell() const {
-    return max_cell_;
-  }
-
-  /** Returns if this buffer includes the last cell of a tile. */
-  bool includes_last_var_cell() const {
-    return includes_last_var_cell_;
+  /** Returns the number of cells to aggregate. */
+  uint64_t size() const {
+    return max_cell_ - min_cell_;
   }
 
   /**
-   * Returns the var data size. Will only be non 0 if the buffers include the
-   * last cell of a var data input.
+   * Get the value at a certain cell index.
+   *
+   * @tparam VALUE_T Value type.
+   * @tparam VALUE_T Returned value type.
+   * @param cell_idx Cell index.
+   *
+   * @return Value.
    */
-  uint64_t var_data_size() const {
-    return var_data_size_;
+  template <typename T>
+  inline T value_at(uint64_t cell_idx) const {
+    cell_idx += min_cell_;
+    if constexpr (std::is_same_v<T, std::string_view>) {
+      if (var_data_.has_value()) {
+        auto offsets = static_cast<const uint64_t*>(fixed_data_);
+        // Return the var sized string.
+        uint64_t offset = offsets[cell_idx];
+        uint64_t next_offset = offsets[cell_idx + 1];
+        return {var_data_.value() + offset, next_offset - offset};
+      } else {
+        // Return the fixed size string.
+        return {
+            static_cast<const char*>(fixed_data_) + cell_size_ * cell_idx,
+            cell_size_};
+      }
+    } else {
+      return static_cast<const T*>(fixed_data_)[cell_idx];
+    }
+  }
+
+  /**
+   * Get the validity value at a certain cell index.
+   *
+   * @param cell_idx Cell index.
+   *
+   * @return Validity value.
+   */
+  inline uint8_t validity_at(const uint64_t cell_idx) const {
+    return validity_data_.value()[cell_idx + min_cell_];
+  }
+
+  /**
+   * Get the bitmap value at a certain cell index.
+   *
+   * @param cell_idx Cell index.
+   *
+   * @return Bitmap value.
+   */
+  template <class BitmapType>
+  inline BitmapType bitmap_at(const uint64_t cell_idx) const {
+    return static_cast<BitmapType*>(bitmap_data_.value())[cell_idx + min_cell_];
   }
 
  private:
   /* ********************************* */
-  /*       PRIVATE CONSTRUCTORS        */
-  /* ********************************* */
-
-  /**
-   * Private constructor used for testing.
-   *
-   * @param min_cell Min cell position to aggregate.
-   * @param max_cell Max cell position to aggregate.
-   * @param cell_num Cell num for the tile.
-   * @param fixed_data Fixed data buffer.
-   * @param var_data Var data buffer.
-   * @param validity_data Validity data buffer.
-   * @param count_bitmap Is the bitmap a count bitmap?
-   * @param name Name of the field for the buffer.
-   * @param var_sized Is the field var sized?
-   * @param nullable Is the field nullable?
-   * @param rt Result tile containing the data.
-   * @param bitmap_data Bitmap data.
-   */
-  AggregateBuffer(
-      const uint64_t min_cell,
-      const uint64_t max_cell,
-      const uint64_t cell_num,
-      const void* fixed_data,
-      const optional<char*> var_data,
-      const uint64_t var_data_size,
-      const optional<uint8_t*> validity_data,
-      const bool count_bitmap,
-      const optional<void*> bitmap_data)
-      : includes_last_var_cell_(var_data.has_value() && max_cell == cell_num)
-      , min_cell_(min_cell)
-      , max_cell_(max_cell)
-      , fixed_data_(fixed_data)
-      , var_data_(var_data)
-      , var_data_size_(var_data_size)
-      , validity_data_(validity_data)
-      , count_bitmap_(count_bitmap)
-      , bitmap_data_(bitmap_data) {
-  }
-
-  /* ********************************* */
   /*         PRIVATE ATTRIBUTES        */
   /* ********************************* */
-
-  /** Does this buffer include the last var cell of the tile. */
-  const bool includes_last_var_cell_;
 
   /** Min cell to aggregate. */
   const uint64_t min_cell_;
@@ -225,9 +166,6 @@ class AggregateBuffer {
   /** Pointer to the var data. */
   const optional<char*> var_data_;
 
-  /** Var data size. */
-  uint64_t var_data_size_;
-
   /** Pointer to the validity data. */
   const optional<uint8_t*> validity_data_;
 
@@ -236,9 +174,11 @@ class AggregateBuffer {
 
   /** Pointer to the bitmap data. */
   const optional<void*> bitmap_data_;
+
+  /** Cell size. */
+  const unsigned cell_size_;
 };
 
-}  // namespace sm
-}  // namespace tiledb
+}  // namespace tiledb::sm
 
 #endif  // TILEDB_AGGREGATE_BUFFER_H

@@ -123,6 +123,7 @@ set(TILEDB_UNIT_TEST_SOURCES
   src/unit-backwards_compat.cc
   src/unit-bufferlist.cc
   src/unit-capi-any.cc
+  src/unit-capi-as_built.cc
   src/unit-capi-array.cc
   src/unit-capi-array_schema.cc
   src/unit-capi-async.cc
@@ -187,6 +188,7 @@ set(TILEDB_UNIT_TEST_SOURCES
   src/unit-tile-metadata-generator.cc
   src/unit-ReadCellSlabIter.cc
   src/unit-Reader.cc
+  src/unit-request-handlers.cc
   src/unit-resource-pool.cc
   src/unit-result-coords.cc
   src/unit-result-tile.cc
@@ -201,6 +203,7 @@ set(TILEDB_UNIT_TEST_SOURCES
   src/unit-SubarrayPartitioner-sparse.cc
   src/unit-vfs.cc
   src/unit-win-filesystem.cc
+  "${CMAKE_SOURCE_DIR}/tiledb/api/c_api/vfs/test/unit_capi_ls_recursive.cc"
   )
 
 if (TILEDB_CPP_API)
@@ -231,6 +234,7 @@ if (TILEDB_CPP_API)
     src/unit-cppapi-nullable.cc
     src/unit-cppapi-partial-attribute-write.cc
     src/unit-cppapi-query.cc
+    src/unit-cppapi-query-condition-sets.cc
     src/cpp-integration-query-condition.cc
     src/unit-cppapi-schema.cc
     src/unit-cppapi-schema-evolution.cc
@@ -259,6 +263,7 @@ endif()
 if (TILEDB_TESTS_ENABLE_REST)
   list(APPEND TILEDB_UNIT_TEST_SOURCES
     src/unit-capi-rest-dense_array.cc
+    src/unit-rest-enumerations.cc
   )
 endif()
 
@@ -284,6 +289,8 @@ add_executable(
 
 add_dependencies(tiledb_unit tiledb_test_support_lib)
 
+target_compile_options(tiledb_unit PRIVATE "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+
 # We want tests to continue as normal even as the API is changing,
 # so don't warn for deprecations, since they'll be escalated to errors.
 if (NOT MSVC)
@@ -299,11 +306,15 @@ target_include_directories(
 target_link_libraries(tiledb_unit
   PUBLIC
     TILEDB_CORE_OBJECTS_ILIB
+    TILEDB_CORE_OBJECTS
     Catch2::Catch2
     tiledb_test_support_lib
 )
 
 target_link_libraries(tiledb_unit PRIVATE $<BUILD_INTERFACE:common>)
+target_include_directories(tiledb_unit PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../external/include"
+)
 
 # need to properly link the signal chaining library for catch to work with the jni hdfs interface
 # see: https://docs.oracle.com/javase/9/vm/signal-chaining.htm
@@ -314,9 +325,6 @@ if (TILEDB_HDFS)
       LibJVM::libjvm
       LibJVM::libjsig
   )
-  target_include_directories(tiledb_unit PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../external/include"
-    )
 endif()
 
 if (TILEDB_TESTS_AWS_S3_CONFIG)
@@ -353,7 +361,7 @@ endif()
 
 # This is necessary only because we are linking directly to the core objects.
 # Other users (e.g. the examples) do not need this flag.
-target_compile_definitions(tiledb_unit PRIVATE -DTILEDB_CORE_OBJECTS_EXPORTS)
+target_compile_definitions(tiledb_unit PRIVATE -Dtiledb_EXPORTS)
 
 target_compile_definitions(tiledb_unit PRIVATE
   -DTILEDB_TEST_INPUTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/inputs"
@@ -388,9 +396,10 @@ if(TILEDB_HDFS)
 endif()
 
 # Add custom target 'check'
-add_custom_target(
-  check COMMAND ${CMAKE_CTEST_COMMAND} -V -C $<CONFIG>
-  DEPENDS tiledb_unit
+add_custom_target(check
+  COMMAND ${CMAKE_CTEST_COMMAND} -V -C $<CONFIG>
+  DEPENDS tests
+  USES_TERMINAL
 )
 
 # CI tests
@@ -399,5 +408,10 @@ if(WIN32)
   add_subdirectory(performance)
 endif()
 
-#add tests related to external items
-add_subdirectory(external)
+add_custom_target(
+  check-package
+  COMMAND ${CMAKE_COMMAND}
+    -DCMAKE_PREFIX_PATH="${CMAKE_INSTALL_PREFIX}$<SEMICOLON>${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}"
+    -B ${CMAKE_CURRENT_BINARY_DIR}/check-package-build
+    ${CMAKE_CURRENT_SOURCE_DIR}/packaging
+)

@@ -64,6 +64,60 @@ class ReaderBase : public StrategyBase {
   /*          TYPE DEFINITIONS         */
   /* ********************************* */
 
+  class NameToLoad {
+   public:
+    /* ********************************* */
+    /*          STATIC FUNCTIONS         */
+    /* ********************************* */
+
+    /** Return a NameToLoad vector from a string vector. */
+    static std::vector<ReaderBase::NameToLoad> from_string_vec(
+        const std::vector<std::string>& names_to_load) {
+      std::vector<ReaderBase::NameToLoad> ret;
+      ret.reserve(names_to_load.size());
+      for (auto& name : names_to_load) {
+        ret.emplace_back(name);
+      }
+
+      return ret;
+    }
+
+    /* ********************************* */
+    /*     CONSTRUCTORS & DESTRUCTORS    */
+    /* ********************************* */
+
+    /** Constructor. */
+    NameToLoad(std::string name, bool validity_only = false)
+        : name_(name)
+        , validity_only_(validity_only) {
+    }
+
+    /* ********************************* */
+    /*          PUBLIC METHODS           */
+    /* ********************************* */
+
+    /** @returns the name to load. */
+    const std::string& name() const {
+      return name_;
+    }
+
+    /** @returns if the field needs to be loaded for validity only. */
+    bool validity_only() const {
+      return validity_only_;
+    }
+
+   private:
+    /* ********************************* */
+    /*        PRIVATE ATTRIBUTES         */
+    /* ********************************* */
+
+    /** Field name to load. */
+    const std::string name_;
+
+    /** Load validity only for the field. */
+    const bool validity_only_;
+  };
+
   /** The state for a read query. */
   struct ReadState {
     /**
@@ -111,17 +165,7 @@ class ReaderBase : public StrategyBase {
 
   /** Constructor. */
   ReaderBase(
-      stats::Stats* stats,
-      shared_ptr<Logger> logger,
-      StorageManager* storage_manager,
-      Array* array,
-      Config& config,
-      std::unordered_map<std::string, QueryBuffer>& buffers,
-      std::unordered_map<std::string, QueryBuffer>& aggregate_buffers,
-      Subarray& subarray,
-      Layout layout,
-      std::optional<QueryCondition>& condition,
-      DefaultChannelAggregates& default_channel_aggregates);
+      stats::Stats* stats, shared_ptr<Logger> logger, StrategyParams& params);
 
   /** Destructor. */
   ~ReaderBase() = default;
@@ -157,6 +201,41 @@ class ReaderBase : public StrategyBase {
       const TileDomain<T>& array_tile_domain,
       const std::vector<TileDomain<T>>& frag_tile_domains,
       std::map<const T*, ResultSpaceTile<T>>& result_space_tiles);
+
+  /**
+   * Computes the minimum and maximum indexes of tile chunks to process based on
+   * the available threads.
+   *
+   * @param num_chunks Total number of chunks in a tile
+   * @param num_range_threads Total number of range threads.
+   * @param range_thread_idx Current range thread index.
+   * @return {min, max}
+   */
+  static tuple<uint64_t, uint64_t> compute_chunk_min_max(
+      const uint64_t num_chunks,
+      const uint64_t num_range_threads,
+      const uint64_t thread_idx) {
+    if (num_range_threads == 0) {
+      throw std::runtime_error("Number of range thread value is 0");
+    }
+
+    if (thread_idx > num_range_threads - 1) {
+      throw std::runtime_error(
+          "Range thread index is greater than number of range threads");
+    }
+
+    if (num_chunks == 0) {
+      return {0, 0};
+    }
+
+    auto t_part_num = std::min(num_chunks, num_range_threads);
+    auto t_min = (thread_idx * num_chunks + t_part_num - 1) / t_part_num;
+    auto t_max = std::min(
+        ((thread_idx + 1) * num_chunks + t_part_num - 1) / t_part_num,
+        num_chunks);
+
+    return {t_min, t_max};
+  }
 
   /* ********************************* */
   /*          PUBLIC METHODS           */
@@ -256,6 +335,35 @@ class ReaderBase : public StrategyBase {
   /*         PROTECTED METHODS         */
   /* ********************************* */
 
+  /** Returns wether the field is for aggregation only or not. */
+  bool aggregate_only(const std::string& name) const {
+    if (qc_loaded_attr_names_set_.count(name) != 0) {
+      return false;
+    }
+
+    if (buffers_.count(name) != 0) {
+      return false;
+    }
+
+    return true;
+  }
+
+  /** Returns wether the field is for null count aggregation only or not. */
+  bool null_count_aggregate_only(const std::string& name) const {
+    if (!aggregate_only(name)) {
+      return false;
+    }
+
+    auto& aggregates = aggregates_.at(name);
+    for (auto& aggregate : aggregates) {
+      if (!aggregate->aggregation_validity_only()) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   /**
    * Returns if we need to process partial timestamp condition for this
    * fragment.
@@ -266,9 +374,9 @@ class ReaderBase : public StrategyBase {
   bool process_partial_timestamps(FragmentMetadata& frag_meta) const;
 
   /**
-   * Deletes the tiles on the input attribute/dimension from the result tiles.
+   * Deletes the tiles on the input field from the result tiles.
    *
-   * @param name The attribute/dimension name.
+   * @param name The field name.
    * @param result_tiles The result tiles to delete from.
    * @param min_result_tile The minimum index to start clearing tiles at.
    * @return void
@@ -353,14 +461,14 @@ class ReaderBase : public StrategyBase {
   }
 
   /**
-   * Loads tile offsets for each attribute/dimension name into
+   * Loads tile offsets for each field name into
    * their associated element in `fragment_metadata_`.
    *
    * @param relevant_fragments List of relevant fragments.
-   * @param names The attribute/dimension names.
+   * @param names The field names.
    * @return Status
    */
-  Status load_tile_offsets(
+  void load_tile_offsets(
       const RelevantFragments& relevant_fragments,
       const std::vector<std::string>& names);
 
@@ -386,14 +494,25 @@ class ReaderBase : public StrategyBase {
   Status add_delete_timestamps_condition();
 
   /**
-   * Loads tile var sizes for each attribute/dimension name into
+   * Loads tile var sizes for each field name into
    * their associated element in `fragment_metadata_`.
    *
    * @param relevant_fragments List of relevant fragments.
-   * @param names The attribute/dimension names.
-   * @return Status
+   * @param names The field names.
    */
-  Status load_tile_var_sizes(
+  void load_tile_var_sizes(
+      const RelevantFragments& relevant_fragments,
+      const std::vector<std::string>& names);
+
+  /*
+   * Loads tile metadata for each field name into
+   * their associated element in `fragment_metadata_`. This is done for
+   * attributes with aggregates.
+   *
+   * @param relevant_fragments List of relevant fragments.
+   * @param names The field names.
+   */
+  void load_tile_metadata(
       const RelevantFragments& relevant_fragments,
       const std::vector<std::string>& names);
 
@@ -403,7 +522,7 @@ class ReaderBase : public StrategyBase {
    * @param subarray The subarray to load processed conditions for.
    * @return Status
    */
-  Status load_processed_conditions();
+  void load_processed_conditions();
 
   /**
    * Read and unfilter attribute tiles.
@@ -414,7 +533,7 @@ class ReaderBase : public StrategyBase {
    * @return Status.
    */
   Status read_and_unfilter_attribute_tiles(
-      const std::vector<std::string>& names,
+      const std::vector<NameToLoad>& names,
       const std::vector<ResultTile*>& result_tiles) const;
 
   /**
@@ -442,7 +561,7 @@ class ReaderBase : public StrategyBase {
    * @return Filtered data blocks.
    */
   std::vector<FilteredData> read_attribute_tiles(
-      const std::vector<std::string>& names,
+      const std::vector<NameToLoad>& names,
       const std::vector<ResultTile*>& result_tiles) const;
 
   /**
@@ -468,35 +587,39 @@ class ReaderBase : public StrategyBase {
    * Concurrently executes across each name in `names` and each result tile
    * in 'result_tiles'.
    *
-   * @param names The attribute/dimension names.
+   * @param names The field names.
    * @param result_tiles The retrieved tiles will be stored inside the
    *     `ResultTile` instances in this vector.
+   * @param validity_only Is the field read for validity only.
    * @return Filtered data blocks.
    */
   std::vector<FilteredData> read_tiles(
-      const std::vector<std::string>& names,
+      const std::vector<NameToLoad>& names,
       const std::vector<ResultTile*>& result_tiles) const;
 
   /**
-   * Filters the tiles on a particular attribute/dimension from all input
+   * Filters the tiles on a particular field from all input
    * fragments based on the tile info in `result_tiles`.
    *
-   * @param name Attribute/dimension whose tiles will be unfiltered.
+   * @param name Field whose tiles will be unfiltered.
+   * @param validity_only Unfilter for the validity tile only?
    * @param result_tiles Vector containing the tiles to be unfiltered.
    * @return Status
    */
   Status unfilter_tiles(
       const std::string& name,
+      const bool validity_only,
       const std::vector<ResultTile*>& result_tiles) const;
 
   /**
    * Unfilter a specific range of chunks in tile
    *
-   * @param name Attribute/dimension the tile belong to.
+   * @param name field the tile belong to.
+   * @param validity_only Unfilter the validity tile only.
    * @param tile Offsets tile to be unfiltered.
-   * @param var_size True if the attribute/dimension is var-sized, false
+   * @param var_size True if the field is var-sized, false
    * otherwise
-   * @param nullable True if the attribute/dimension is nullable, false
+   * @param nullable True if the field is nullable, false
    * otherwise
    * @param range_thread_idx Current range thread index.
    * @param num_range_threads Total number of range threads.
@@ -508,6 +631,7 @@ class ReaderBase : public StrategyBase {
    */
   Status unfilter_tile(
       const std::string& name,
+      const bool validity_only,
       ResultTile* const tile,
       const bool var_size,
       const bool nullable,
@@ -516,20 +640,6 @@ class ReaderBase : public StrategyBase {
       const ChunkData& tile_chunk_data,
       const ChunkData& tile_chunk_var_data,
       const ChunkData& tile_chunk_validity_data) const;
-
-  /**
-   * Computes the minimum and maximum indexes of tile chunks to process based on
-   * the available threads.
-   *
-   * @param num_chunks Total number of chunks in a tile
-   * @param num_range_threads Total number of range threads.
-   * @param range_thread_idx Current range thread index.
-   * @return {min, max}
-   */
-  tuple<uint64_t, uint64_t> compute_chunk_min_max(
-      const uint64_t num_chunks,
-      const uint64_t num_range_threads,
-      const uint64_t thread_idx) const;
 
   /**
    * Returns the configured bytesize for var-sized attribute offsets
@@ -570,7 +680,7 @@ class ReaderBase : public StrategyBase {
    * https://github.com/TileDB-Inc/TileDB/issues/1053. For format version > 4,
    * a tile never stores coordinates
    *
-   * @param name Attribute/dimension the tile belongs to.
+   * @param name field the tile belongs to.
    * @param tile Tile to zip the coordinates if needed.
    * @return Status
    */
@@ -580,11 +690,12 @@ class ReaderBase : public StrategyBase {
    * Reads the chunk data of all tile buffers and stores them in a data
    * structure together with the offsets between them
    *
-   * @param name Attribute/dimension the tile belong to.
+   * @param name field the tile belong to.
+   * @param validity_only Is the field read for validity only.
    * @param tile Offsets tile to be unfiltered.
-   * @param var_size True if the attribute/dimension is var-sized, false
+   * @param var_size True if the field is var-sized, false
    * otherwise
-   * @param nullable True if the attribute/dimension is nullable, false
+   * @param nullable True if the field is nullable, false
    * otherwise
    * @param tile_chunk_data Tile/offsets tile chunk info, buffers and
    * offsets
@@ -597,6 +708,7 @@ class ReaderBase : public StrategyBase {
   tuple<Status, optional<uint64_t>, optional<uint64_t>, optional<uint64_t>>
   load_tile_chunk_data(
       const std::string& name,
+      const bool validity_only,
       ResultTile* const tile,
       const bool var_size,
       const bool nullable,
@@ -607,11 +719,12 @@ class ReaderBase : public StrategyBase {
   /**
    * Perform some necessary post-processing on a tile that was just unfiiltered
    *
-   * @param name Attribute/dimension the tile belong to.
+   * @param name field the tile belong to.
+   * @param validity_only Is the field read for validity only.
    * @param tile Offsets tile that was just unfiltered.
-   * @param var_size True if the attribute/dimension is var-sized, false
+   * @param var_size True if the field is var-sized, false
    * otherwise
-   * @param nullable True if the attribute/dimension is nullable, false
+   * @param nullable True if the field is nullable, false
    * otherwise
    * @param unfiltered_tile_size Size of the unfiltered tile buffer
    * @param unfiltered_tile_var_size Size of the unfiltered tile_var buffer
@@ -621,6 +734,7 @@ class ReaderBase : public StrategyBase {
    */
   Status post_process_unfiltered_tile(
       const std::string& name,
+      const bool validity_only,
       ResultTile* const tile,
       const bool var_size,
       const bool nullable) const;

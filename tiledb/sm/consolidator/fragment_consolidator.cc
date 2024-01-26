@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2022 TileDB, Inc.
+ * @copyright Copyright (c) 2022-2023 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -40,6 +40,7 @@
 #include "tiledb/sm/query/query.h"
 #include "tiledb/sm/stats/global_stats.h"
 #include "tiledb/sm/storage_manager/storage_manager.h"
+#include "tiledb/storage_format/uri/generate_uri.h"
 #include "tiledb/storage_format/uri/parse_uri.h"
 
 #include <iostream>
@@ -50,12 +51,129 @@ using namespace tiledb::common;
 
 namespace tiledb::sm {
 
-class FragmentConsolidatorStatusException : public StatusException {
+class FragmentConsolidatorException : public StatusException {
  public:
-  explicit FragmentConsolidatorStatusException(const std::string& message)
+  explicit FragmentConsolidatorException(const std::string& message)
       : StatusException("FragmentConsolidator", message) {
   }
 };
+
+void FragmentConsolidationWorkspace::resize_buffers(
+    stats::Stats* stats,
+    const FragmentConsolidationConfig& config,
+    const ArraySchema& array_schema,
+    std::unordered_map<std::string, uint64_t>& avg_cell_sizes) {
+  auto timer_se = stats->start_timer("resize_buffers");
+
+  // For easy reference
+  auto attribute_num = array_schema.attribute_num();
+  auto& domain{array_schema.domain()};
+  auto dim_num = array_schema.dim_num();
+  auto sparse = !array_schema.dense();
+
+  // Calculate buffer weights. We reserve the maximum possible number of buffers
+  // to make only one allocation. If an attribute is var size and nullable, it
+  // has 3 buffers, dimensions only have 2 as they cannot be nullable. Then one
+  // buffer for timestamps, and 2 for delete metadata.
+  std::vector<size_t> buffer_weights;
+  buffer_weights.reserve(attribute_num * 3 + dim_num * 2 + 3);
+  for (unsigned i = 0; i < attribute_num; ++i) {
+    const auto attr = array_schema.attributes()[i];
+    const auto var_size = attr->var_size();
+
+    // First buffer is either the var size offsets or the fixed size data.
+    buffer_weights.emplace_back(
+        var_size ? constants::cell_var_offset_size : attr->cell_size());
+
+    // For var size attributes, add the data buffer weight.
+    if (var_size) {
+      buffer_weights.emplace_back(avg_cell_sizes[attr->name()]);
+    }
+
+    // For nullable attributes, add the validity buffer weight.
+    if (attr->nullable()) {
+      buffer_weights.emplace_back(constants::cell_validity_size);
+    }
+  }
+
+  // Add weights for sparse dimensions.
+  if (sparse) {
+    for (unsigned i = 0; i < dim_num; ++i) {
+      const auto dim = domain.dimension_ptr(i);
+      const auto var_size = dim->var_size();
+
+      // First buffer is either the var size offsets or the fixed size data.
+      buffer_weights.emplace_back(
+          var_size ? constants::cell_var_offset_size : dim->coord_size());
+
+      // For var size attributes, add the data buffer weight.
+      if (var_size) {
+        buffer_weights.emplace_back(avg_cell_sizes[dim->name()]);
+      }
+    }
+  }
+
+  // Add weights for timestamp attribute.
+  if (config.with_timestamps_ && sparse) {
+    buffer_weights.emplace_back(constants::timestamp_size);
+  }
+
+  // Adding buffers for delete meta, one for timestamp and one for condition
+  // index.
+  if (config.with_delete_meta_) {
+    buffer_weights.emplace_back(constants::timestamp_size);
+    buffer_weights.emplace_back(sizeof(uint64_t));
+  }
+
+  // Use the old buffer size setting to see how much memory we would use.
+  auto buffer_num = buffer_weights.size();
+  uint64_t total_budget = config.total_buffer_size_;
+
+  // If a user set the per-attribute buffer size configuration, we override
+  // the use of the total_budget_size config setting for backwards
+  // compatible behavior.
+  if (config.buffer_size_ != 0) {
+    total_budget = config.buffer_size_ * buffer_num;
+  }
+
+  // Calculate the size of individual buffers by assigning a weight based
+  // percentage of the total buffer size.
+  auto total_weights = std::accumulate(
+      buffer_weights.begin(), buffer_weights.end(), static_cast<size_t>(0));
+
+  uint64_t adjusted_budget = total_budget / total_weights * total_weights;
+
+  if (buffer_num > buffers_.size()) {
+    sizes_.resize(buffer_num);
+  }
+
+  size_t offset = 0;
+  for (unsigned i = 0; i < buffer_num; ++i) {
+    sizes_[i] = std::max<uint64_t>(
+        1, adjusted_budget * buffer_weights[i] / total_weights);
+    offset += sizes_[i];
+  }
+
+  // Total size is the final offset value
+  size_t final_budget = offset;
+
+  // Ensure that our backing buffer is large enough to reference the final
+  // budget number of bytes.
+  if (final_budget > backing_buffer_.size()) {
+    backing_buffer_.resize(final_budget);
+  }
+
+  // Finally, update our spans referencing the backing buffer.
+  if (buffer_num > buffers_.size()) {
+    buffers_.resize(buffer_num);
+  }
+
+  offset = 0;
+  for (unsigned i = 0; i < buffer_num; ++i) {
+    buffers_[i] = span(&(backing_buffer_[offset]), sizes_[i]);
+    offset += sizes_[i];
+  }
+}
 
 /* ****************************** */
 /*          CONSTRUCTOR           */
@@ -66,7 +184,7 @@ FragmentConsolidator::FragmentConsolidator(
     : Consolidator(storage_manager) {
   auto st = set_config(config);
   if (!st.ok()) {
-    throw std::logic_error(st.message());
+    throw FragmentConsolidatorException(st.message());
   }
 }
 
@@ -107,7 +225,7 @@ Status FragmentConsolidator::consolidate(
   // must be fetched (even before `config_.timestamp_start_`),
   // to compute the anterior ND range that can help determine
   // which dense fragments are consolidatable.
-  FragmentInfo fragment_info(URI(array_name), storage_manager_);
+  FragmentInfo fragment_info(URI(array_name), storage_manager_->resources());
   auto st = fragment_info.load(
       array_for_reads->array_directory(),
       config_.timestamp_start_,
@@ -120,6 +238,8 @@ Status FragmentConsolidator::consolidate(
     throw_if_not_ok(array_for_writes->close());
     return st;
   }
+
+  FragmentConsolidationWorkspace cw;
 
   uint32_t step = 0;
   std::vector<TimestampedURI> to_consolidate;
@@ -153,7 +273,8 @@ Status FragmentConsolidator::consolidate(
         array_for_writes,
         to_consolidate,
         union_non_empty_domains,
-        &new_fragment_uri);
+        &new_fragment_uri,
+        cw);
     if (!st.ok()) {
       throw_if_not_ok(array_for_reads->close());
       throw_if_not_ok(array_for_writes->close());
@@ -216,7 +337,7 @@ Status FragmentConsolidator::consolidate_fragments(
   }
 
   // Get all fragment info
-  FragmentInfo fragment_info(URI(array_name), storage_manager_);
+  FragmentInfo fragment_info(URI(array_name), storage_manager_->resources());
   auto st = fragment_info.load(
       array_for_reads->array_directory(),
       0,
@@ -259,6 +380,8 @@ Status FragmentConsolidator::consolidate_fragments(
         "Cannot consolidate; Not all fragments could be found"));
   }
 
+  FragmentConsolidationWorkspace cw;
+
   // Consolidate the selected fragments
   URI new_fragment_uri;
   st = consolidate_internal(
@@ -266,7 +389,8 @@ Status FragmentConsolidator::consolidate_fragments(
       array_for_writes,
       to_consolidate,
       union_non_empty_domains,
-      &new_fragment_uri);
+      &new_fragment_uri,
+      cw);
   if (!st.ok()) {
     throw_if_not_ok(array_for_reads->close());
     throw_if_not_ok(array_for_writes->close());
@@ -292,7 +416,7 @@ Status FragmentConsolidator::consolidate_fragments(
 
 void FragmentConsolidator::vacuum(const char* array_name) {
   if (array_name == nullptr) {
-    throw Status_StorageManagerError(
+    throw FragmentConsolidatorException(
         "Cannot vacuum fragments; Array name cannot be null");
   }
 
@@ -314,10 +438,9 @@ void FragmentConsolidator::vacuum(const char* array_name) {
     array_dir.write_commit_ignore_file(commit_uris_to_ignore);
   }
 
-  // Delete the commit and vacuum files
+  // Delete the vacuum files.
   auto vfs = storage_manager_->vfs();
   auto compute_tp = storage_manager_->compute_tp();
-  vfs->remove_files(compute_tp, filtered_fragment_uris.commit_uris_to_vacuum());
   vfs->remove_files(
       compute_tp, filtered_fragment_uris.fragment_vac_uris_to_vacuum());
 
@@ -325,6 +448,14 @@ void FragmentConsolidator::vacuum(const char* array_name) {
   throw_if_not_ok(parallel_for(
       compute_tp, 0, fragment_uris_to_vacuum.size(), [&](size_t i) {
         RETURN_NOT_OK(vfs->remove_dir(fragment_uris_to_vacuum[i]));
+
+        // Remove the commit file, if present.
+        auto commit_uri = array_dir.get_commit_uri(fragment_uris_to_vacuum[i]);
+        bool is_file = false;
+        RETURN_NOT_OK(vfs->is_file(commit_uri, &is_file));
+        if (is_file) {
+          RETURN_NOT_OK(vfs->remove_file(commit_uri));
+        }
 
         return Status::Ok();
       }));
@@ -340,7 +471,7 @@ bool FragmentConsolidator::are_consolidatable(
     size_t start,
     size_t end,
     const NDRange& union_non_empty_domains) const {
-  auto anterior_ndrange = fragment_info.anterior_ndrange();
+  const auto& anterior_ndrange = fragment_info.anterior_ndrange();
   if (anterior_ndrange.size() != 0 &&
       domain.overlap(union_non_empty_domains, anterior_ndrange))
     return false;
@@ -368,10 +499,11 @@ Status FragmentConsolidator::consolidate_internal(
     shared_ptr<Array> array_for_writes,
     const std::vector<TimestampedURI>& to_consolidate,
     const NDRange& union_non_empty_domains,
-    URI* new_fragment_uri) {
+    URI* new_fragment_uri,
+    FragmentConsolidationWorkspace& cw) {
   auto timer_se = stats_->start_timer("consolidate_internal");
 
-  RETURN_NOT_OK(array_for_reads->load_fragments(to_consolidate));
+  array_for_reads->load_fragments(to_consolidate);
 
   if (array_for_reads->is_empty()) {
     return Status::Ok();
@@ -411,8 +543,7 @@ Status FragmentConsolidator::consolidate_internal(
 
   // Prepare buffers
   auto average_var_cell_sizes = array_for_reads->get_average_var_cell_sizes();
-  auto&& [buffers, buffer_sizes] =
-      create_buffers(stats_, config_, array_schema, average_var_cell_sizes);
+  cw.resize_buffers(stats_, config_, array_schema, average_var_cell_sizes);
 
   // Create queries
   auto query_r = (Query*)nullptr;
@@ -443,12 +574,13 @@ Status FragmentConsolidator::consolidate_internal(
   }
 
   // Read from one array and write to the other
-  st = copy_array(query_r, query_w, &buffers, &buffer_sizes);
-  if (!st.ok()) {
+  try {
+    copy_array(query_r, query_w, cw);
+  } catch (...) {
     tdb_delete(query_r);
     tdb_delete(query_w);
-    return st;
-  }
+    throw;
+  };
 
   // Finalize write query
   st = query_w->finalize();
@@ -487,129 +619,36 @@ Status FragmentConsolidator::consolidate_internal(
   return st;
 }
 
-Status FragmentConsolidator::copy_array(
-    Query* query_r,
-    Query* query_w,
-    std::vector<ByteVec>* buffers,
-    std::vector<uint64_t>* buffer_sizes) {
+void FragmentConsolidator::copy_array(
+    Query* query_r, Query* query_w, FragmentConsolidationWorkspace& cw) {
   auto timer_se = stats_->start_timer("consolidate_copy_array");
 
   // Set the read query buffers outside the repeated submissions.
   // The Reader will reset the query buffer sizes to the original
   // sizes, not the potentially smaller sizes of the results after
   // the query submission.
-  RETURN_NOT_OK(set_query_buffers(query_r, buffers, buffer_sizes));
+  set_query_buffers(query_r, cw);
 
   do {
     // READ
-    RETURN_NOT_OK(query_r->submit());
+    throw_if_not_ok(query_r->submit());
 
     // If Consolidation cannot make any progress, throw. The first buffer will
-    // always contain fixed size data, wether it is tile offsets for var size
+    // always contain fixed size data, whether it is tile offsets for var size
     // attribute/dimension or the actual fixed size data so we can use its size
     // to know if any cells were written or not.
-    if (buffer_sizes->at(0) == 0) {
-      throw FragmentConsolidatorStatusException(
+    if (cw.sizes().at(0) == 0) {
+      throw FragmentConsolidatorException(
           "Consolidation read 0 cells, no progress can be made");
     }
 
     // Set explicitly the write query buffers, as the sizes may have
     // been altered by the read query.
-    RETURN_NOT_OK(set_query_buffers(query_w, buffers, buffer_sizes));
+    set_query_buffers(query_w, cw);
 
     // WRITE
-    RETURN_NOT_OK(query_w->submit());
+    throw_if_not_ok(query_w->submit());
   } while (query_r->status() == QueryStatus::INCOMPLETE);
-
-  return Status::Ok();
-}
-
-tuple<std::vector<ByteVec>, std::vector<uint64_t>>
-FragmentConsolidator::create_buffers(
-    stats::Stats* stats,
-    const ConsolidationConfig& config,
-    const ArraySchema& array_schema,
-    std::unordered_map<std::string, uint64_t>& avg_cell_sizes) {
-  auto timer_se = stats->start_timer("consolidate_create_buffers");
-
-  // For easy reference
-  auto attribute_num = array_schema.attribute_num();
-  auto& domain{array_schema.domain()};
-  auto dim_num = array_schema.dim_num();
-  auto sparse = !array_schema.dense();
-
-  // Calculate buffer weights. We reserve the maximum possible number of buffers
-  // to make only one allocation. If an attribute is var size and nullable, it
-  // has 3 buffers, dimensions only have 2 as they cannot be nullable. Then one
-  // buffer for timestamps, and 2 for delete metadata.
-  std::vector<size_t> buffer_weights;
-  buffer_weights.reserve(attribute_num * 3 + dim_num * 2 + 3);
-  for (unsigned i = 0; i < attribute_num; ++i) {
-    const auto attr = array_schema.attributes()[i];
-    const auto var_size = attr->var_size();
-
-    // First buffer is either the var size offsets or the fixed size data.
-    buffer_weights.emplace_back(
-        var_size ? constants::cell_var_offset_size : attr->cell_size());
-
-    // For var size attributes, add the data buffer weight.
-    if (var_size) {
-      buffer_weights.emplace_back(avg_cell_sizes[attr->name()]);
-    }
-
-    // For nullable attributes, add the validity buffer weight.
-    if (attr->nullable()) {
-      buffer_weights.emplace_back(constants::cell_validity_size);
-    }
-  }
-
-  if (sparse) {
-    for (unsigned i = 0; i < dim_num; ++i) {
-      const auto dim = domain.dimension_ptr(i);
-      const auto var_size = dim->var_size();
-
-      // First buffer is either the var size offsets or the fixed size data.
-      buffer_weights.emplace_back(
-          var_size ? constants::cell_var_offset_size : dim->coord_size());
-
-      // For var size attributes, add the data buffer weight.
-      if (var_size) {
-        buffer_weights.emplace_back(avg_cell_sizes[dim->name()]);
-      }
-    }
-  }
-
-  if (config.with_timestamps_ && sparse) {
-    buffer_weights.emplace_back(constants::timestamp_size);
-  }
-
-  // Adding buffers for delete meta, one for timestamp and one for condition
-  // index.
-  if (config.with_delete_meta_) {
-    buffer_weights.emplace_back(constants::timestamp_size);
-    buffer_weights.emplace_back(sizeof(uint64_t));
-  }
-
-  // Use the old buffer size setting to see how much memory we would use.
-  auto buffer_num = buffer_weights.size();
-  uint64_t total_budget = config.buffer_size_ * buffer_num;
-
-  // Create buffers.
-  std::vector<ByteVec> buffers(buffer_num);
-  std::vector<uint64_t> buffer_sizes(buffer_num);
-  auto total_weights =
-      std::accumulate(buffer_weights.begin(), buffer_weights.end(), 0);
-
-  // Allocate space for each buffer.
-  uint64_t adjusted_budget = total_budget / total_weights * total_weights;
-  for (unsigned i = 0; i < buffer_num; ++i) {
-    buffer_sizes[i] = std::max<uint64_t>(
-        1, adjusted_budget * buffer_weights[i] / total_weights);
-    buffers[i].resize(buffer_sizes[i]);
-  }
-
-  // Success
-  return {buffers, buffer_sizes};
 }
 
 Status FragmentConsolidator::create_queries(
@@ -649,9 +688,8 @@ Status FragmentConsolidator::create_queries(
   auto last = (*query_r)->last_fragment_uri();
 
   auto write_version = array_for_reads->array_schema_latest().write_version();
-  auto fragment_name =
-      array_for_reads->array_directory().compute_new_fragment_name(
-          first, last, write_version);
+  auto fragment_name = storage_format::generate_consolidated_fragment_name(
+      first, last, write_version);
 
   // Create write query
   *query_w = tdb_new(Query, storage_manager_, array_for_writes, fragment_name);
@@ -796,10 +834,11 @@ Status FragmentConsolidator::compute_next_to_consolidate(
   return Status::Ok();
 }
 
-Status FragmentConsolidator::set_query_buffers(
-    Query* query,
-    std::vector<ByteVec>* buffers,
-    std::vector<uint64_t>* buffer_sizes) const {
+void FragmentConsolidator::set_query_buffers(
+    Query* query, FragmentConsolidationWorkspace& cw) const {
+  std::vector<span<std::byte>>* buffers{&cw.buffers()};
+  std::vector<uint64_t>* buffer_sizes{&cw.sizes()};
+
   const auto& array_schema = query->array_schema();
   auto dim_num = array_schema.dim_num();
   auto dense = array_schema.dense();
@@ -878,8 +917,6 @@ Status FragmentConsolidator::set_query_buffers(
         &(*buffer_sizes)[bid]));
     ++bid;
   }
-
-  return Status::Ok();
 }
 
 Status FragmentConsolidator::set_config(const Config& config) {
@@ -896,8 +933,22 @@ Status FragmentConsolidator::set_config(const Config& config) {
       "sm.consolidation.steps", &config_.steps_, &found));
   assert(found);
   config_.buffer_size_ = 0;
+  // Only set the buffer_size_ if the user specified a value. Otherwise, we use
+  // the new sm.consolidation.total_buffer_size instead.
+  if (merged_config.set_params().count("sm.consolidation.buffer_size") > 0) {
+    logger_->warn(
+        "The `sm.consolidation.buffer_size configuration setting has been "
+        "deprecated. Set consolidation buffer sizes using the newer "
+        "`sm.consolidation.total_buffer_size` setting.");
+    RETURN_NOT_OK(merged_config.get<uint64_t>(
+        "sm.consolidation.buffer_size", &config_.buffer_size_, &found));
+    assert(found);
+  }
+  config_.total_buffer_size_ = 0;
   RETURN_NOT_OK(merged_config.get<uint64_t>(
-      "sm.consolidation.buffer_size", &config_.buffer_size_, &found));
+      "sm.consolidation.total_buffer_size",
+      &config_.total_buffer_size_,
+      &found));
   assert(found);
   config_.max_fragment_size_ = 0;
   RETURN_NOT_OK(merged_config.get<uint64_t>(

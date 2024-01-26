@@ -133,7 +133,6 @@ struct SparseArrayFx {
       const std::vector<float>& a3);
   void create_temp_dir(const std::string& path);
   void remove_temp_dir(const std::string& path);
-  static std::string random_name(const std::string& prefix);
   void check_sorted_reads(
       const std::string& array_name,
       tiledb_filter_type_t compressor,
@@ -259,13 +258,6 @@ void SparseArrayFx::remove_temp_dir(const std::string& path) {
   REQUIRE(tiledb_vfs_is_dir(ctx_, vfs_, path.c_str(), &is_dir) == TILEDB_OK);
   if (is_dir)
     REQUIRE(tiledb_vfs_remove_dir(ctx_, vfs_, path.c_str()) == TILEDB_OK);
-}
-
-std::string SparseArrayFx::random_name(const std::string& prefix) {
-  std::stringstream ss;
-  ss << prefix << "-" << std::this_thread::get_id() << "-"
-     << TILEDB_TIMESTAMP_NOW_MS;
-  return ss.str();
 }
 
 void SparseArrayFx::create_sparse_array_2D(
@@ -764,15 +756,15 @@ void SparseArrayFx::check_sorted_reads(
     tiledb_layout_t tile_order,
     tiledb_layout_t cell_order) {
   // Parameters used in this test
-  int64_t domain_size_0 = 5000;
-  int64_t domain_size_1 = 1000;
-  int64_t tile_extent_0 = 100;
-  int64_t tile_extent_1 = 100;
+  int64_t domain_size_0 = 2500;
+  int64_t domain_size_1 = 500;
+  int64_t tile_extent_0 = 50;
+  int64_t tile_extent_1 = 50;
   int64_t domain_0_lo = 0;
   int64_t domain_0_hi = domain_size_0 - 1;
   int64_t domain_1_lo = 0;
   int64_t domain_1_hi = domain_size_1 - 1;
-  int64_t capacity = 100000;
+  int64_t capacity = 25000;
   int iter_num = (compressor != TILEDB_FILTER_BZIP2) ? ITER_NUM : 1;
 
   create_sparse_array_2D(

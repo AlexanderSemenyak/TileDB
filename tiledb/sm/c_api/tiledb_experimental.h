@@ -44,7 +44,10 @@
 #include "tiledb/api/c_api/attribute/attribute_api_external_experimental.h"
 #include "tiledb/api/c_api/enumeration/enumeration_api_experimental.h"
 #include "tiledb/api/c_api/group/group_api_external_experimental.h"
+#include "tiledb/api/c_api/query_aggregate/query_aggregate_api_external_experimental.h"
+#include "tiledb/api/c_api/query_field/query_field_api_external_experimental.h"
 #include "tiledb/api/c_api/query_plan/query_plan_api_external_experimental.h"
+#include "tiledb/api/c_api/vfs/vfs_api_experimental.h"
 #include "tiledb_dimension_label_experimental.h"
 
 /* ********************************* */
@@ -73,7 +76,7 @@ extern "C" {
  * @return `TILEDB_OK` for success and `TILEDB_ERR` for error.
  */
 TILEDB_EXPORT capi_return_t
-tiledb_log_warn(tiledb_ctx_t* ctx, const char* message);
+tiledb_log_warn(tiledb_ctx_t* ctx, const char* message) TILEDB_NOEXCEPT;
 
 /* ********************************* */
 /*              AS BUILT             */
@@ -211,6 +214,41 @@ TILEDB_EXPORT capi_return_t tiledb_array_schema_evolution_add_enumeration(
     tiledb_enumeration_t* enumeration) TILEDB_NOEXCEPT;
 
 /**
+ * Extends an enumeration during array schema evolution.
+ *
+ * **Example:**
+ *
+ * @code{.c}
+ * tiledb_enumeration_t* original_enmr = get_existing_enumeration();
+ * const void* data = get_new_data();
+ * uint64_t data_size = get_new_data_size();
+ * tiledb_enumeration_t* new_enmr;
+ * tiledb_enumeration_extend(
+ *     ctx,
+ *     original_enmr,
+ *     data,
+ *     data_size,
+ *     nullptr,
+ *     0,
+ *     &new_enmr);
+ * tiledb_array_schema_evolution_extend_enumeration(
+ *     ctx,
+ *     array_schema_evolution,
+ *     new_enmr);
+ * @endcode
+ *
+ * @param ctx The TileDB context.
+ * @param array_schema_evolution The schema evolution.
+ * @param enumeration The enumeration to be extended. This should be the result
+ *        of a call to tiledb_enumeration_extend.
+ * @return `TILEDB_OK` for success and `TILEDB_ERR` for error.
+ */
+TILEDB_EXPORT capi_return_t tiledb_array_schema_evolution_extend_enumeration(
+    tiledb_ctx_t* ctx,
+    tiledb_array_schema_evolution_t* array_schema_evolution,
+    tiledb_enumeration_t* enumeration) TILEDB_NOEXCEPT;
+
+/**
  * Drops an enumeration from an array schema evolution.
  *
  * **Example:**
@@ -317,28 +355,6 @@ TILEDB_EXPORT int32_t tiledb_array_schema_add_enumeration(
     tiledb_array_schema_t* array_schema,
     tiledb_enumeration_t* enumeration) TILEDB_NOEXCEPT;
 
-/**
- * Retrieves the schema of an array from the disk with all enumerations loaded,
- * creating an array schema struct.
- *
- * **Example:**
- *
- * @code{.c}
- * tiledb_array_schema_t* array_schema;
- * tiledb_array_schema_load(ctx, "s3://tiledb_bucket/my_array", &array_schema);
- * // Make sure to free the array schema in the end
- * @endcode
- *
- * @param ctx The TileDB context.
- * @param array_uri The array whose schema will be retrieved.
- * @param array_schema The array schema to be retrieved, or `NULL` upon error.
- * @return `TILEDB_OK` for success and `TILEDB_OOM` or `TILEDB_ERR` for error.
- */
-TILEDB_EXPORT int32_t tiledb_array_schema_load_with_enumerations(
-    tiledb_ctx_t* ctx,
-    const char* array_uri,
-    tiledb_array_schema_t** array_schema) TILEDB_NOEXCEPT;
-
 /* ********************************* */
 /*               ARRAY               */
 /* ********************************* */
@@ -440,9 +456,7 @@ TILEDB_EXPORT capi_return_t tiledb_array_get_enumeration(
  * @return `TILEDB_OK` for success and `TILEDB_ERR` for error.
  */
 TILEDB_EXPORT capi_return_t tiledb_array_load_all_enumerations(
-    tiledb_ctx_t* ctx,
-    const tiledb_array_t* array,
-    int latest_only) TILEDB_NOEXCEPT;
+    tiledb_ctx_t* ctx, const tiledb_array_t* array) TILEDB_NOEXCEPT;
 
 /**
  * Upgrades an array to the latest format version.
@@ -556,6 +570,44 @@ TILEDB_EXPORT int32_t tiledb_query_get_relevant_fragment_num(
 /* ********************************* */
 /*          QUERY CONDITION          */
 /* ********************************* */
+
+/**
+ * Initializes a TileDB query condition set membership object.
+ *
+ * **Example:**
+ *
+ * @code{.c}
+ * tiledb_query_condition_t* cond
+ * tiledb_query_condition_alloc_set_membership(
+ *   ctx,
+ *   "some_name",
+ *   data,
+ *   data_size,
+ *   offsets,
+ *   offsets_size,
+ *   TILEDB_QUERY_CONDITION_OP_IN,
+ *   &cond);
+ * @endcode
+ *
+ * @param ctx The TileDB context.
+ * @param field_name The field name.
+ * @param data A pointer to the set member data.
+ * @param data_size The length of the data buffer.
+ * @param offsets A pointer to the array of offsets of members.
+ * @param offsets_size The length of the offsets array in bytes.
+ * @param op The set membership operator to use.
+ * @param cond The allocated query condition object.
+ * @return `TILEDB_OK` for success and `TILEDB_ERR` for error.
+ */
+TILEDB_EXPORT capi_return_t tiledb_query_condition_alloc_set_membership(
+    tiledb_ctx_t* ctx,
+    const char* field_name,
+    const void* data,
+    uint64_t data_size,
+    const void* offsets,
+    uint64_t offests_size,
+    tiledb_query_condition_op_t op,
+    tiledb_query_condition_t** cond) TILEDB_NOEXCEPT;
 
 /**
  * Disable the use of enumerations on the given QueryCondition

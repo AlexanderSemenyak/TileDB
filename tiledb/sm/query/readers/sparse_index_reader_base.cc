@@ -67,33 +67,13 @@ SparseIndexReaderBase::SparseIndexReaderBase(
     std::string reader_string,
     stats::Stats* stats,
     shared_ptr<Logger> logger,
-    StorageManager* storage_manager,
-    Array* array,
-    Config& config,
-    std::unordered_map<std::string, QueryBuffer>& buffers,
-    std::unordered_map<std::string, QueryBuffer>& aggregate_buffers,
-    Subarray& subarray,
-    Layout layout,
-    std::optional<QueryCondition>& condition,
-    DefaultChannelAggregates& default_channel_aggregates,
-    bool skip_checks_serialization,
+    StrategyParams& params,
     bool include_coords)
-    : ReaderBase(
-          stats,
-          logger,
-          storage_manager,
-          array,
-          config,
-          buffers,
-          aggregate_buffers,
-          subarray,
-          layout,
-          condition,
-          default_channel_aggregates)
-    , tmp_read_state_(array->fragment_metadata().size())
-    , memory_budget_(config, reader_string)
+    : ReaderBase(stats, logger, params)
+    , tmp_read_state_(array_->fragment_metadata().size())
+    , memory_budget_(config_, reader_string)
     , include_coords_(include_coords)
-    , array_memory_tracker_(array->memory_tracker())
+    , array_memory_tracker_(params.memory_tracker())
     , memory_used_for_coords_total_(0)
     , deletes_consolidation_no_purge_(
           buffers_.count(constants::delete_timestamps) != 0)
@@ -104,7 +84,7 @@ SparseIndexReaderBase::SparseIndexReaderBase(
         "Cannot initialize reader; Storage manager not set");
   }
 
-  if (!skip_checks_serialization && buffers_.empty() &&
+  if (!params.skip_checks_serialization() && buffers_.empty() &&
       aggregate_buffers_.empty()) {
     throw SparseIndexReaderBaseStatusException(
         "Cannot initialize reader; Buffers not set");
@@ -358,7 +338,7 @@ Status SparseIndexReaderBase::load_initial_data() {
 
   // Load processed conditions from fragment metadata.
   if (delete_and_update_conditions_.size() > 0) {
-    throw_if_not_ok(load_processed_conditions());
+    load_processed_conditions();
   }
 
   // Make a list of dim/attr that will be loaded for query condition.
@@ -499,16 +479,18 @@ void SparseIndexReaderBase::load_tile_offsets_for_fragments(
   // Preload zipped coordinate tile offsets. Note that this will
   // ignore fragments with a version >= 5.
   std::vector<std::string> zipped_coords_names = {constants::coords};
-  throw_if_not_ok(load_tile_offsets(relevant_fragments, zipped_coords_names));
+  load_tile_offsets(relevant_fragments, zipped_coords_names);
 
   // Preload unzipped coordinate tile offsets. Note that this will
   // ignore fragments with a version < 5.
-  throw_if_not_ok(load_tile_offsets(relevant_fragments, dim_names_));
+  load_tile_offsets(relevant_fragments, dim_names_);
 
   // Load tile offsets and var sizes for attributes.
-  throw_if_not_ok(load_tile_var_sizes(relevant_fragments, var_size_to_load_));
-  throw_if_not_ok(
-      load_tile_offsets(relevant_fragments, attr_tile_offsets_to_load_));
+  load_tile_var_sizes(relevant_fragments, var_size_to_load_);
+  load_tile_offsets(relevant_fragments, attr_tile_offsets_to_load_);
+
+  // Load tile metadata.
+  load_tile_metadata(relevant_fragments, attr_tile_offsets_to_load_);
 }
 
 Status SparseIndexReaderBase::read_and_unfilter_coords(
@@ -545,8 +527,14 @@ Status SparseIndexReaderBase::read_and_unfilter_coords(
       std::back_inserter(attr_to_load));
 
   // Read and unfilter attribute tiles.
+  std::vector<ReaderBase::NameToLoad> to_load;
+  to_load.reserve(attr_to_load.size());
+  for (auto& name : attr_to_load) {
+    to_load.emplace_back(name);
+  }
+
   RETURN_CANCEL_OR_ERROR(
-      read_and_unfilter_attribute_tiles(attr_to_load, result_tiles));
+      read_and_unfilter_attribute_tiles(to_load, result_tiles));
 
   logger_->debug("Done reading and unfiltering coords tiles");
   return Status::Ok();
@@ -832,15 +820,23 @@ std::vector<std::string> SparseIndexReaderBase::read_and_unfilter_attributes(
     const std::vector<std::string>& names,
     const std::vector<uint64_t>& mem_usage_per_attr,
     uint64_t* buffer_idx,
-    std::vector<ResultTile*>& result_tiles) {
+    std::vector<ResultTile*>& result_tiles,
+    bool agg_only) {
   auto timer_se = stats_->start_timer("read_and_unfilter_attributes");
   const uint64_t memory_budget = available_memory();
 
-  std::vector<std::string> names_to_read;
+  std::vector<ReaderBase::NameToLoad> names_to_read;
   std::vector<std::string> names_to_copy;
   uint64_t memory_used = 0;
   while (*buffer_idx < names.size()) {
     auto& name = names[*buffer_idx];
+
+    // Stop processing if we are doing non aggregates only fields and we hit an
+    // aggregates only field. Aggregates only field will pass in a filteted list
+    // of tiles to load.
+    if (!agg_only && aggregate_only(name)) {
+      break;
+    }
 
     auto attr_mem_usage = mem_usage_per_attr[*buffer_idx];
     if (memory_used + attr_mem_usage < memory_budget) {
@@ -848,7 +844,7 @@ std::vector<std::string> SparseIndexReaderBase::read_and_unfilter_attributes(
 
       // We only read attributes, so dimensions have 0 cost.
       if (attr_mem_usage != 0) {
-        names_to_read.emplace_back(name);
+        names_to_read.emplace_back(name, null_count_aggregate_only(name));
       }
 
       names_to_copy.emplace_back(name);
@@ -869,10 +865,18 @@ std::vector<std::string> SparseIndexReaderBase::field_names_to_process() {
   std::vector<std::string> ret;
   std::unordered_set<std::string> added_names;
 
+  // Guarantee the same ordering of buffers over different platform to guarantee
+  // that tests have consistent behaviors.
+  std::vector<std::string> names;
+  names.reserve(buffers_.size());
+  for (auto& buffer : buffers_) {
+    names.emplace_back(buffer.first);
+  }
+  std::sort(names.begin(), names.end());
+
   // First add var fields with no aggregates that need recompute in case of
   // overflow.
-  for (auto& buffer : buffers_) {
-    auto& name = buffer.first;
+  for (auto& name : names) {
     if (!array_schema_.var_size(name)) {
       continue;
     }
@@ -893,8 +897,7 @@ std::vector<std::string> SparseIndexReaderBase::field_names_to_process() {
   }
 
   // Second add the rest of the var fields.
-  for (auto& buffer : buffers_) {
-    auto& name = buffer.first;
+  for (auto& name : names) {
     if (array_schema_.var_size(name) && added_names.count(name) == 0) {
       ret.emplace_back(name);
       added_names.emplace(name);
@@ -902,8 +905,7 @@ std::vector<std::string> SparseIndexReaderBase::field_names_to_process() {
   }
 
   // Now for the fixed fields.
-  for (auto& buffer : buffers_) {
-    auto& name = buffer.first;
+  for (auto& name : names) {
     if (!array_schema_.var_size(name)) {
       ret.emplace_back(name);
       added_names.emplace(name);

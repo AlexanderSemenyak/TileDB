@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2022 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2024 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -40,14 +40,33 @@
 
 #include "tiledb/common/common.h"
 
-namespace tiledb {
-namespace sm {
-
+namespace tiledb::sm {
 enum class Datatype : uint8_t;
 enum class Compressor : uint8_t;
 enum class SerializationType : uint8_t;
 
 namespace constants {
+
+// The following aggregate constants are declared static to avoid a SIOF
+// issue with constant aggregate operator handles with extern linkage.
+
+/** The name of COUNT aggregator. */
+static const std::string aggregate_count_str = "COUNT";
+
+/** The name of SUM aggregator. */
+static const std::string aggregate_sum_str = "SUM";
+
+/** The name of MIN aggregator. */
+static const std::string aggregate_min_str = "MIN";
+
+/** The name of MAX aggregator. */
+static const std::string aggregate_max_str = "MAX";
+
+/** The name of NULL_COUNT aggregator. */
+static const std::string aggregate_null_count_str = "NULL_COUNT";
+
+/** The name of MEAN aggregator. */
+static const std::string aggregate_mean_str = "MEAN";
 
 /**
  * Reduction factor (must be in [0.0, 1.0]) for the multi_range subarray
@@ -332,6 +351,12 @@ extern const std::string query_condition_op_eq_str;
 /** TILEDB_NE Query Condition Op String **/
 extern const std::string query_condition_op_ne_str;
 
+/** TILEDB_IN Query Condition Op String **/
+extern const std::string query_condition_op_in_str;
+
+/** TILEDB_NOT_IN Query Condition Op String **/
+extern const std::string query_condition_op_not_in_str;
+
 /** TILEDB_AND Query Condition Combination Op String **/
 extern const std::string query_condition_combination_op_and_str;
 
@@ -461,6 +486,12 @@ extern const std::string char_str;
 
 /** The string representation for type blob. */
 extern const std::string blob_str;
+
+/** The string representation for type geom_wkb. */
+extern const std::string geom_wkb_str;
+
+/** The string representation for type geom_wkt. */
+extern const std::string geom_wkt_str;
 
 /** The string representation for type bool. */
 extern const std::string bool_str;
@@ -663,6 +694,9 @@ extern const format_version_t deletes_min_version;
 /** The lowest version supported for updates. */
 extern const format_version_t updates_min_version;
 
+/** The lowest version supported for tile min/max/sum/null count data. */
+extern const format_version_t tile_metadata_min_version;
+
 /** The lowest version supported for enumerations. */
 extern const format_version_t enumerations_min_format_version;
 
@@ -692,6 +726,9 @@ extern const unsigned int gcs_attempt_sleep_ms;
 
 /** An allocation tag used for logging. */
 extern const std::string s3_allocation_tag;
+
+/** The S3 custom headers config key prefix. */
+extern const std::string s3_header_prefix;
 
 /** Prefix indicating a special name reserved by TileDB. */
 extern const std::string special_name_prefix;
@@ -752,9 +789,8 @@ extern const uint64_t s3_min_multipart_part_size;
  * global order writes intermediate chunks
  */
 extern const std::string s3_multipart_buffering_dirname;
-}  // namespace constants
 
-}  // namespace sm
-}  // namespace tiledb
+}  // namespace constants
+}  // namespace tiledb::sm
 
 #endif  // TILEDB_CONSTANTS_H

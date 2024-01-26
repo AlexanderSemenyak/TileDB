@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2023 TileDB, Inc.
  * @copyright Copyright (c) 2016 MIT and Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -123,7 +123,6 @@ struct ArraySchemaFx {
   void delete_array(const std::string& path);
   bool is_array(const std::string& path);
   void load_and_check_array_schema(const std::string& path);
-  static std::string random_name(const std::string& prefix);
 
   int array_create_wrapper(
       const std::string& path, tiledb_array_schema_t* array_schema);
@@ -909,10 +908,11 @@ void ArraySchemaFx::load_and_check_array_schema(const std::string& path) {
       "  > RLE: COMPRESSION_LEVEL=-1\n\n" + "### Dimension ###\n" +
       "- Name: " + DIM1_NAME + "\n" + "- Type: INT64\n" +
       "- Cell val num: 1\n" + "- Domain: " + DIM1_DOMAIN_STR + "\n" +
-      "- Tile extent: " + DIM1_TILE_EXTENT_STR + "\n" + "- Filters: 0\n\n" +
-      "### Dimension ###\n" + "- Name: " + DIM2_NAME + "\n" +
-      "- Type: INT64\n" + "- Cell val num: 1\n" +
-      "- Domain: " + DIM2_DOMAIN_STR + "\n" +
+      "- Tile extent: " + DIM1_TILE_EXTENT_STR + "\n" + "- Filters: 1\n" +
+      "  > ZSTD: COMPRESSION_LEVEL=-1\n\n"
+      "### Dimension ###\n" +
+      "- Name: " + DIM2_NAME + "\n" + "- Type: INT64\n" +
+      "- Cell val num: 1\n" + "- Domain: " + DIM2_DOMAIN_STR + "\n" +
       "- Tile extent: " + DIM2_TILE_EXTENT_STR + "\n" + "- Filters: 2\n" +
       "  > BZIP2: COMPRESSION_LEVEL=5\n" +
       "  > BitWidthReduction: BIT_WIDTH_MAX_WINDOW=1000\n\n" +
@@ -942,13 +942,6 @@ void ArraySchemaFx::load_and_check_array_schema(const std::string& path) {
   tiledb_dimension_free(&dim);
   tiledb_domain_free(&domain);
   tiledb_array_schema_free(&array_schema);
-}
-
-std::string ArraySchemaFx::random_name(const std::string& prefix) {
-  std::stringstream ss;
-  ss << prefix << "-" << std::this_thread::get_id() << "-"
-     << TILEDB_TIMESTAMP_NOW_MS;
-  return ss.str();
 }
 
 int ArraySchemaFx::get_schema_file_struct(const char* path, void* data) {
@@ -2148,6 +2141,8 @@ TEST_CASE_METHOD(
   tiledb_array_t* array;
   rc = tiledb_array_alloc(ctx_, array_name.c_str(), &array);
   REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_array_set_open_timestamp_end(ctx_, array, now + 1);
+  REQUIRE(rc == TILEDB_OK);
   rc = tiledb_array_open(ctx_, array, TILEDB_READ);
   REQUIRE(rc == TILEDB_OK);
   tiledb_array_schema_t* read_schema;
@@ -2291,6 +2286,8 @@ TEST_CASE_METHOD(
   tiledb_array_t* array;
   rc = tiledb_array_alloc(ctx_, array_name.c_str(), &array);
   REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_array_set_open_timestamp_end(ctx_, array, now + 1);
+  REQUIRE(rc == TILEDB_OK);
   rc = tiledb_array_open(ctx_, array, TILEDB_READ);
   REQUIRE(rc == TILEDB_OK);
   tiledb_array_schema_t* read_schema;
@@ -2382,6 +2379,8 @@ TEST_CASE_METHOD(
   // Open array
   tiledb_array_t* array;
   rc = tiledb_array_alloc(ctx_, array_uri.c_str(), &array);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_array_set_open_timestamp_end(ctx_, array, now + 1);
   REQUIRE(rc == TILEDB_OK);
   rc = tiledb_array_open(ctx_, array, TILEDB_READ);
   REQUIRE(rc == TILEDB_OK);

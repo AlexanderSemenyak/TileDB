@@ -493,16 +493,7 @@ class SparseIndexReaderBase : public ReaderBase {
       std::string reader_string,
       stats::Stats* stats,
       shared_ptr<Logger> logger,
-      StorageManager* storage_manager,
-      Array* array,
-      Config& config,
-      std::unordered_map<std::string, QueryBuffer>& buffers,
-      std::unordered_map<std::string, QueryBuffer>& aggregate_buffers,
-      Subarray& subarray,
-      Layout layout,
-      std::optional<QueryCondition>& condition,
-      DefaultChannelAggregates& default_channel_aggregates,
-      bool skip_checks_serialization,
+      StrategyParams& params,
       bool include_coords);
 
   /** Destructor. */
@@ -680,6 +671,7 @@ class SparseIndexReaderBase : public ReaderBase {
    * @param mem_usage_per_attr Computed per attribute memory usage.
    * @param buffer_idx Stores/return the current buffer index in process.
    * @param result_tiles Result tiles to process.
+   * @param agg_only Are we loading for aggregates only field.
    *
    * @return names_to_copy.
    */
@@ -687,7 +679,8 @@ class SparseIndexReaderBase : public ReaderBase {
       const std::vector<std::string>& names,
       const std::vector<uint64_t>& mem_usage_per_attr,
       uint64_t* buffer_idx,
-      std::vector<ResultTile*>& result_tiles);
+      std::vector<ResultTile*>& result_tiles,
+      bool agg_only);
 
   /**
    * Get the field names to process.

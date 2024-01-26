@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2022 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2023 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -45,7 +45,6 @@
 #include "tiledb/sm/misc/tdb_math.h"
 #include "tiledb/sm/misc/tdb_time.h"
 #include "tiledb/sm/misc/utils.h"
-#include "tiledb/sm/misc/uuid.h"
 #include "tiledb/sm/query/hilbert_order.h"
 #include "tiledb/sm/query/query_macros.h"
 #include "tiledb/sm/stats/global_stats.h"
@@ -53,13 +52,13 @@
 #include "tiledb/sm/tile/generic_tile_io.h"
 #include "tiledb/sm/tile/tile_metadata_generator.h"
 #include "tiledb/sm/tile/writer_tile_tuple.h"
+#include "tiledb/type/apply_with_type.h"
 
 using namespace tiledb;
 using namespace tiledb::common;
 using namespace tiledb::sm::stats;
 
-namespace tiledb {
-namespace sm {
+namespace tiledb::sm {
 
 /* ****************************** */
 /*   CONSTRUCTORS & DESTRUCTORS   */
@@ -68,38 +67,26 @@ namespace sm {
 OrderedWriter::OrderedWriter(
     stats::Stats* stats,
     shared_ptr<Logger> logger,
-    StorageManager* storage_manager,
-    Array* array,
-    Config& config,
-    std::unordered_map<std::string, QueryBuffer>& buffers,
-    Subarray& subarray,
-    Layout layout,
+    StrategyParams& params,
     std::vector<WrittenFragmentInfo>& written_fragment_info,
     Query::CoordsInfo& coords_info,
     bool remote_query,
-    optional<std::string> fragment_name,
-    bool skip_checks_serialization)
+    optional<std::string> fragment_name)
     : WriterBase(
           stats,
           logger,
-          storage_manager,
-          array,
-          config,
-          buffers,
-          subarray,
-          layout,
+          params,
           written_fragment_info,
           false,
           coords_info,
           remote_query,
-          fragment_name,
-          skip_checks_serialization)
+          fragment_name)
     , frag_uri_(std::nullopt) {
-  if (layout != Layout::ROW_MAJOR && layout != Layout::COL_MAJOR) {
+  if (layout_ != Layout::ROW_MAJOR && layout_ != Layout::COL_MAJOR) {
     throw StatusException(Status_WriterError(
         "Failed to initialize OrderedWriter; The ordered writer does not "
         "support layout " +
-        layout_str(layout)));
+        layout_str(layout_)));
   }
 
   if (!array_schema_.dense()) {
@@ -173,52 +160,15 @@ Status OrderedWriter::ordered_write() {
   assert(array_schema_.dense());
 
   auto type{array_schema_.domain().dimension_ptr(0)->type()};
-  switch (type) {
-    case Datatype::INT8:
-      return ordered_write<int8_t>();
-    case Datatype::UINT8:
-      return ordered_write<uint8_t>();
-    case Datatype::INT16:
-      return ordered_write<int16_t>();
-    case Datatype::UINT16:
-      return ordered_write<uint16_t>();
-    case Datatype::INT32:
-      return ordered_write<int32_t>();
-    case Datatype::UINT32:
-      return ordered_write<uint32_t>();
-    case Datatype::INT64:
-      return ordered_write<int64_t>();
-    case Datatype::UINT64:
-      return ordered_write<uint64_t>();
-    case Datatype::DATETIME_YEAR:
-    case Datatype::DATETIME_MONTH:
-    case Datatype::DATETIME_WEEK:
-    case Datatype::DATETIME_DAY:
-    case Datatype::DATETIME_HR:
-    case Datatype::DATETIME_MIN:
-    case Datatype::DATETIME_SEC:
-    case Datatype::DATETIME_MS:
-    case Datatype::DATETIME_US:
-    case Datatype::DATETIME_NS:
-    case Datatype::DATETIME_PS:
-    case Datatype::DATETIME_FS:
-    case Datatype::DATETIME_AS:
-    case Datatype::TIME_HR:
-    case Datatype::TIME_MIN:
-    case Datatype::TIME_SEC:
-    case Datatype::TIME_MS:
-    case Datatype::TIME_US:
-    case Datatype::TIME_NS:
-    case Datatype::TIME_PS:
-    case Datatype::TIME_FS:
-    case Datatype::TIME_AS:
-      return ordered_write<int64_t>();
-    default:
-      return logger_->status(Status_WriterError(
-          "Cannot write in ordered layout; Unsupported domain type"));
-  }
 
-  return Status::Ok();
+  auto g = [&](auto T) {
+    if constexpr (tiledb::type::TileDBIntegral<decltype(T)>) {
+      return ordered_write<decltype(T)>();
+    }
+    return Status_WriterError(
+        "Cannot write in ordered layout; Unsupported domain type");
+  };
+  return apply_with_type(g, type);
 }
 
 template <class T>
@@ -241,7 +191,7 @@ Status OrderedWriter::ordered_write() {
   auto tile_num = dense_tiler.tile_num();
 
   // Set number of tiles in the fragment metadata
-  throw_if_not_ok(frag_meta->set_num_tiles(tile_num));
+  frag_meta->set_num_tiles(tile_num);
 
   // Prepare, filter and write tiles for all attributes
   auto attr_num = buffers_.size();
@@ -429,5 +379,4 @@ Status OrderedWriter::prepare_filter_and_write_tiles(
   return Status::Ok();
 }
 
-}  // namespace sm
-}  // namespace tiledb
+}  // namespace tiledb::sm

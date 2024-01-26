@@ -55,6 +55,7 @@
 #include "tiledb/sm/tile/generic_tile_io.h"
 #include "tiledb/storage_format/uri/generate_uri.h"
 #include "tiledb/storage_format/uri/parse_uri.h"
+#include "tiledb/type/apply_with_type.h"
 
 #include <algorithm>
 #include <cassert>
@@ -83,19 +84,18 @@ ArraySchema::ArraySchema()
 }
 
 ArraySchema::ArraySchema(ArrayType array_type)
-    : array_type_(array_type) {
-  allows_dups_ = false;
-  array_uri_ = URI();
-  uri_ = URI();
-  name_ = "";
-  capacity_ = constants::capacity;
-  cell_order_ = Layout::ROW_MAJOR;
-  domain_ = nullptr;
-  tile_order_ = Layout::ROW_MAJOR;
-  version_ = constants::format_version;
-  auto timestamp = utils::time::timestamp_now_ms();
-  timestamp_range_ = std::make_pair(timestamp, timestamp);
-
+    : uri_(URI())
+    , array_uri_(URI())
+    , version_(constants::format_version)
+    , timestamp_range_(std::make_pair(
+          utils::time::timestamp_now_ms(), utils::time::timestamp_now_ms()))
+    , name_("")
+    , array_type_(array_type)
+    , allows_dups_(false)
+    , domain_(nullptr)
+    , cell_order_(Layout::ROW_MAJOR)
+    , tile_order_(Layout::ROW_MAJOR)
+    , capacity_(constants::capacity) {
   // Set up default filter pipelines for coords, offsets, and validity values.
   coords_filters_.add_filter(CompressionFilter(
       constants::coords_compression,
@@ -111,44 +111,7 @@ ArraySchema::ArraySchema(ArrayType array_type)
       Datatype::UINT8));
 
   // Generate URI and name for ArraySchema
-  throw_if_not_ok(generate_uri());
-}
-
-ArraySchema::ArraySchema(
-    URI uri,
-    uint32_t version,
-    std::pair<uint64_t, uint64_t> timestamp_range,
-    std::string name,
-    ArrayType array_type,
-    bool allows_dups,
-    shared_ptr<Domain> domain,
-    Layout cell_order,
-    Layout tile_order,
-    uint64_t capacity,
-    std::vector<shared_ptr<const Attribute>> attributes,
-    std::vector<shared_ptr<const DimensionLabel>> dim_label_refs,
-    std::unordered_map<std::string, std::string> enumeration_path_map,
-    FilterPipeline cell_var_offsets_filters,
-    FilterPipeline cell_validity_filters,
-    FilterPipeline coords_filters)
-    : ArraySchema(
-          uri,
-          version,
-          timestamp_range,
-          name,
-          array_type,
-          allows_dups,
-          domain,
-          cell_order,
-          tile_order,
-          capacity,
-          attributes,
-          dim_label_refs,
-          {},
-          enumeration_path_map,
-          cell_var_offsets_filters,
-          cell_validity_filters,
-          coords_filters) {
+  generate_uri();
 }
 
 ArraySchema::ArraySchema(
@@ -418,39 +381,24 @@ void ArraySchema::check_webp_filter() const {
           "WebP filter dimensions 0, 1 should have matching integral types");
     }
 
-    switch (x_dim->type()) {
-      case Datatype::INT8:
-        webp->set_extents<int8_t>(domain_->tile_extents());
-        break;
-      case Datatype::INT16:
-        webp->set_extents<int16_t>(domain_->tile_extents());
-        break;
-      case Datatype::INT32:
-        webp->set_extents<int32_t>(domain_->tile_extents());
-        break;
-      case Datatype::INT64:
-        webp->set_extents<int64_t>(domain_->tile_extents());
-        break;
-      case Datatype::UINT8:
-        webp->set_extents<uint8_t>(domain_->tile_extents());
-        break;
-      case Datatype::UINT16:
-        webp->set_extents<uint16_t>(domain_->tile_extents());
-        break;
-      case Datatype::UINT32:
-        webp->set_extents<uint32_t>(domain_->tile_extents());
-        break;
-      case Datatype::UINT64:
-        webp->set_extents<uint64_t>(domain_->tile_extents());
-        break;
-      default:
+    auto g = [&](auto T) {
+      if constexpr (tiledb::type::TileDBIntegral<decltype(T)>) {
+        webp->set_extents<decltype(T)>(domain_->tile_extents());
+      } else {
         throw ArraySchemaException(
             "WebP filter requires integral dimensions at index 0, 1");
-    }
+      }
+    };
+    apply_with_type(g, x_dim->type());
   }
 }
 
-void ArraySchema::check() const {
+void ArraySchema::check(const Config& cfg) const {
+  check_without_config();
+  check_enumerations(cfg);
+}
+
+void ArraySchema::check_without_config() const {
   if (domain_ == nullptr)
     throw ArraySchemaException{"Array schema check failed; Domain not set"};
 
@@ -585,6 +533,40 @@ void ArraySchema::check_dimension_label_schema(
   }
 }
 
+void ArraySchema::check_enumerations(const Config& cfg) const {
+  auto max_size = cfg.get<uint64_t>("sm.enumerations_max_size");
+  if (!max_size.has_value()) {
+    throw std::runtime_error(
+        "Missing required config parameter 'sm.enumerations_max_size'.");
+  }
+
+  auto max_total_size = cfg.get<uint64_t>("sm.enumerations_max_total_size");
+  if (!max_total_size.has_value()) {
+    throw std::runtime_error(
+        "Missing required config parameter 'sm.enumerations_max_total_size'.");
+  }
+
+  uint64_t total_size = 0;
+  for (const auto& pair : enumeration_map_) {
+    uint64_t size = pair.second->data().size() + pair.second->offsets().size();
+    if (size > max_size.value()) {
+      throw ArraySchemaException(
+          "Invalid enumeration '" + pair.second->name() +
+          "' has a size "
+          "exceeding " +
+          std::to_string(max_size.value()) + " bytes.");
+    }
+    total_size += size;
+  }
+
+  if (total_size > max_total_size.value()) {
+    throw ArraySchemaException(
+        "Total enumeration size for the entire schema "
+        "exceeds " +
+        std::to_string(max_total_size.value()) + " bytes.");
+  }
+}
+
 const FilterPipeline& ArraySchema::filters(const std::string& name) const {
   if (is_special_attribute(name)) {
     return coords_filters();
@@ -600,7 +582,7 @@ const FilterPipeline& ArraySchema::filters(const std::string& name) const {
   auto dim_it = dim_map_.find(name);
   assert(dim_it != dim_map_.end());
   const auto& ret = dim_it->second->filters();
-  return !ret.empty() ? ret : coords_filters();
+  return ret;
 }
 
 const FilterPipeline& ArraySchema::coords_filters() const {
@@ -697,7 +679,15 @@ void ArraySchema::dump(FILE* out) const {
 
   for (auto& enmr_iter : enumeration_map_) {
     fprintf(out, "\n");
-    enmr_iter.second->dump(out);
+    if (enmr_iter.second != nullptr) {
+      enmr_iter.second->dump(out);
+    } else {
+      std::stringstream ss;
+      ss << "### Enumeration ###" << std::endl;
+      ss << "- Name: " << enmr_iter.first << std::endl;
+      ss << "- Loaded: false" << std::endl;
+      fprintf(out, "%s", ss.str().c_str());
+    }
   }
 
   for (auto& label : dimension_labels_) {
@@ -1087,6 +1077,51 @@ void ArraySchema::add_enumeration(shared_ptr<const Enumeration> enmr) {
   enumeration_path_map_[enmr->name()] = enmr->path_name();
 }
 
+void ArraySchema::extend_enumeration(shared_ptr<const Enumeration> enmr) {
+  if (enmr == nullptr) {
+    throw ArraySchemaException(
+        "Error adding enumeration. Enumeration must not be nullptr.");
+  }
+
+  auto it = enumeration_map_.find(enmr->name());
+  if (it == enumeration_map_.end()) {
+    throw ArraySchemaException(
+        "Error extending enumeration. Enumeration with name '" + enmr->name() +
+        "' does not exist in this ArraySchema.");
+  }
+
+  if (it->second == nullptr) {
+    throw ArraySchemaException(
+        "Error extending enumeration. Enumeration with name '" + enmr->name() +
+        "' is not loaded.");
+  }
+
+  if (!enmr->is_extension_of(it->second)) {
+    throw ArraySchemaException(
+        "Error extending enumeration. Provided enumeration is not an extension "
+        "of the current state of '" +
+        enmr->name() + "'");
+  }
+
+  if (enumeration_path_map_.find(enmr->name()) == enumeration_path_map_.end()) {
+    throw ArraySchemaException(
+        "Error extending enumeration. Invalid enumeration path map state for "
+        "enumeration '" +
+        enmr->name() + "'");
+  }
+
+  for (auto& enmr_path : enumeration_path_map_) {
+    if (enmr->path_name() == enmr_path.second) {
+      throw ArraySchemaException(
+          "Error extending enumeration. Enumeration path name for '" +
+          enmr->name() + "' already exists in this schema.");
+    }
+  }
+
+  enumeration_map_[enmr->name()] = enmr;
+  enumeration_path_map_[enmr->name()] = enmr->path_name();
+}
+
 void ArraySchema::store_enumeration(shared_ptr<const Enumeration> enmr) {
   if (enmr == nullptr) {
     throw ArraySchemaException(
@@ -1277,7 +1312,7 @@ ArraySchema ArraySchema::deserialize(
   // Load filters
   // Note: Security validation delegated to invoked API
   auto coords_filters{
-      FilterPipeline::deserialize(deserializer, version, Datatype::ANY)};
+      FilterPipeline::deserialize(deserializer, version, Datatype::UINT64)};
   auto cell_var_filters{
       FilterPipeline::deserialize(deserializer, version, Datatype::UINT64)};
   FilterPipeline cell_validity_filters;
@@ -1289,8 +1324,8 @@ ArraySchema ArraySchema::deserialize(
   // Load domain
   // Note: Security validation delegated to invoked API
   // #TODO Add security validation
-  auto domain{
-      Domain::deserialize(deserializer, version, cell_order, tile_order)};
+  auto domain{Domain::deserialize(
+      deserializer, version, cell_order, tile_order, coords_filters)};
 
   // Load attributes
   // Note: Security validation delegated to invoked API
@@ -1341,8 +1376,8 @@ ArraySchema ArraySchema::deserialize(
     auto type{domain->dimension_ptr(0)->type()};
     if (datatype_is_real(type)) {
       throw ArraySchemaException(
-          "Array schema check failed; Dense arrays cannot have floating point "
-          "domains");
+          "Array schema check failed; Dense arrays cannot have floating "
+          "point domains");
     }
     if (attributes.size() == 0) {
       throw ArraySchemaException(
@@ -1357,8 +1392,6 @@ ArraySchema ArraySchema::deserialize(
   // Set schema name
   std::string name = uri.last_path_part();
 
-  // TODO: This is the only use of an extraneous constructor that only omits a
-  // single argument. Use the full one instead.
   return ArraySchema(
       uri,
       version,
@@ -1372,10 +1405,13 @@ ArraySchema ArraySchema::deserialize(
       capacity,
       attributes,
       dimension_labels,
+      {},
       enumeration_path_map,
       cell_var_filters,
       cell_validity_filters,
-      coords_filters);
+      FilterPipeline(
+          coords_filters,
+          version < 5 ? domain->dimension_ptr(0)->type() : Datatype::UINT64));
 }
 
 Status ArraySchema::set_allows_dups(bool allows_dups) {
@@ -1535,10 +1571,9 @@ format_version_t ArraySchema::version() const {
   return version_;
 }
 
-Status ArraySchema::set_timestamp_range(
+void ArraySchema::set_timestamp_range(
     const std::pair<uint64_t, uint64_t>& timestamp_range) {
   timestamp_range_ = timestamp_range;
-  return Status::Ok();
 }
 
 std::pair<uint64_t, uint64_t> ArraySchema::timestamp_range() const {
@@ -1667,36 +1702,19 @@ void ArraySchema::clear() {
   timestamp_range_ = std::make_pair(0, 0);
 }
 
-Status ArraySchema::generate_uri() {
-  std::string uuid;
-  RETURN_NOT_OK(uuid::generate_uuid(&uuid, false));
+void ArraySchema::generate_uri(
+    std::optional<std::pair<uint64_t, uint64_t>> timestamp_range) {
+  if (timestamp_range == std::nullopt) {
+    auto timestamp = utils::time::timestamp_now_ms();
+    timestamp_range_ = std::make_pair(timestamp, timestamp);
+  } else {
+    timestamp_range_ = timestamp_range.value();
+  }
 
-  auto timestamp = utils::time::timestamp_now_ms();
-  timestamp_range_ = std::make_pair(timestamp, timestamp);
-  std::stringstream ss;
-  ss << "__" << timestamp_range_.first << "_" << timestamp_range_.second << "_"
-     << uuid;
-  name_ = ss.str();
+  name_ = tiledb::storage_format::generate_timestamped_name(
+      timestamp_range_.first, timestamp_range_.second, std::nullopt);
   uri_ =
       array_uri_.join_path(constants::array_schema_dir_name).join_path(name_);
-
-  return Status::Ok();
-}
-
-Status ArraySchema::generate_uri(
-    const std::pair<uint64_t, uint64_t>& timestamp_range) {
-  std::string uuid;
-  RETURN_NOT_OK(uuid::generate_uuid(&uuid, false));
-
-  timestamp_range_ = timestamp_range;
-  std::stringstream ss;
-  ss << "__" << timestamp_range_.first << "_" << timestamp_range_.second << "_"
-     << uuid;
-  name_ = ss.str();
-  uri_ =
-      array_uri_.join_path(constants::array_schema_dir_name).join_path(name_);
-
-  return Status::Ok();
 }
 
 }  // namespace tiledb::sm

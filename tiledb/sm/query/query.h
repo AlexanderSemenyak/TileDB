@@ -51,6 +51,7 @@
 #include "tiledb/sm/query/query_condition.h"
 #include "tiledb/sm/query/query_remote_buffer_storage.h"
 #include "tiledb/sm/query/readers/aggregators/iaggregator.h"
+#include "tiledb/sm/query/readers/aggregators/query_channel.h"
 #include "tiledb/sm/query/update_value.h"
 #include "tiledb/sm/query/validity_vector.h"
 #include "tiledb/sm/storage_manager/storage_manager_declaration.h"
@@ -227,6 +228,9 @@ class Query {
   /** Returns the names of dimension label buffers for the query. */
   std::vector<std::string> dimension_label_buffer_names() const;
 
+  /** Returns the names of aggregate buffers for the query. */
+  std::vector<std::string> aggregate_buffer_names() const;
+
   /**
    * Returns the names of the buffers set by the user for the query not already
    * written by a previous partial attribute write.
@@ -234,7 +238,7 @@ class Query {
   std::vector<std::string> unwritten_buffer_names() const;
 
   /**
-   * Gets the query buffer for the input attribute/dimension.
+   * Gets the query buffer for the input field.
    * An empty string means the special default attribute.
    */
   QueryBuffer buffer(const std::string& name) const;
@@ -739,6 +743,38 @@ class Query {
     default_channel_aggregates_.emplace(output_field_name, aggregator);
   }
 
+  /** Returns an aggregate based on the output field. */
+  std::optional<shared_ptr<IAggregator>> get_aggregate(
+      std::string output_field_name) const;
+
+  /**
+   * Get a list of all channels and their aggregates
+   */
+  std::vector<QueryChannel> get_channels() {
+    // Currently only the default channel is supported
+    return {QueryChannel(true, default_channel_aggregates_)};
+  }
+
+  /**
+   * Add a channel to the query
+   */
+  void add_channel(const QueryChannel& channel) {
+    if (channel.is_default()) {
+      default_channel_aggregates_ = channel.aggregates();
+      return;
+    }
+    throw std::logic_error(
+        "We currently only support a default channel for queries");
+  }
+
+  /**
+   * Returns true if the query has any aggregates on any channels
+   */
+  bool has_aggregates() {
+    // We only need to check the default channel for now
+    return default_channel_aggregates_.empty();
+  }
+
  private:
   /* ********************************* */
   /*         PRIVATE ATTRIBUTES        */
@@ -748,9 +784,14 @@ class Query {
    * Ensures that the Array object exists as long as the Query object exists. */
   shared_ptr<Array> array_shared_;
 
-  /** The array the query is associated with.
-   * Cached copy of array_shared_.get(). */
+  /**
+   * The array the query is associated with.
+   * Cached copy of array_shared_.get().
+   */
   Array* array_;
+
+  /** Keeps a copy of the opened array object at construction. */
+  shared_ptr<OpenedArray> opened_array_;
 
   /** The array schema. */
   shared_ptr<const ArraySchema> array_schema_;
@@ -946,7 +987,7 @@ class Query {
    * The query will only query dimension labels if all the following are true:
    * 1. At most one dimension buffer is set.
    * 2. No attribute buffers are set.
-   * 3. At least one label buffer is set.
+   * 3. At least one label buffer or subarray label range is set.
    */
   bool only_dim_label_query() const;
 

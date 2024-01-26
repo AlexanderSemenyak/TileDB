@@ -33,6 +33,7 @@
 #ifndef TILEDB_ARRAY_DIRECTORY_H
 #define TILEDB_ARRAY_DIRECTORY_H
 
+#include "tiledb/common/memory_tracker.h"
 #include "tiledb/common/status.h"
 #include "tiledb/common/thread_pool.h"
 #include "tiledb/sm/array_schema/array_schema.h"
@@ -47,8 +48,7 @@
 
 using namespace tiledb::common;
 
-namespace tiledb {
-namespace sm {
+namespace tiledb::sm {
 
 /** Mode for the ArrayDirectory class. */
 enum class ArrayDirectoryMode {
@@ -286,7 +286,7 @@ class ArrayDirectory {
   /* ********************************* */
 
   /**
-   * Constructor.
+   * Constructor. Needed for serialization.
    *
    * @param resources A reference to a ContextResources instance
    * @param uri The URI of the array directory
@@ -386,27 +386,16 @@ class ArrayDirectory {
   load_all_array_schemas(const EncryptionKey& encryption_key) const;
 
   /**
-   * Load an enumeration from schema with the given name.
+   * Load the enumerations from the provided list of paths.
    *
-   * @param schema The ArraySchema that references the enumeration name.
-   * @param enumeration_name The name of the enumeration to load.
+   * @param enumeration_paths The list of enumeration paths to load.
    * @param encryption_key The encryption key to use.
-   * @return shared_ptr<Enumeration> The loaded enumeration.
+   * @return The loaded enumerations.
    */
-  shared_ptr<const Enumeration> load_enumeration(
-      shared_ptr<ArraySchema> schema,
-      const std::string& enumeration_name,
-      const EncryptionKey& encryption_key) const;
-
-  /**
-   * Load all enumerations for the given schema.
-   *
-   * @param schema The ArraySchema to load Enumerations for
-   * @param encryption_key The encryption key to use.
-   */
-  void load_all_enumerations(
-      shared_ptr<ArraySchema> schema,
-      const EncryptionKey& encryption_key) const;
+  std::vector<shared_ptr<const Enumeration>> load_enumerations_from_paths(
+      const std::vector<std::string>& enumeration_paths,
+      const EncryptionKey& encryption_key,
+      MemoryTracker& memory_tracker) const;
 
   /** Returns the array URI. */
   const URI& uri() const;
@@ -465,13 +454,6 @@ class ArrayDirectory {
 
   /** Returns the URI for a vacuum file. */
   URI get_vacuum_uri(const URI& fragment_uri) const;
-
-  /**
-   * The new fragment name is computed
-   * as `__<first_URI_timestamp>_<last_URI_timestamp>_<uuid>`.
-   */
-  std::string compute_new_fragment_name(
-      const URI& first, const URI& last, format_version_t format_version) const;
 
   /** Returns `true` if `load` has been run. */
   bool loaded() const;
@@ -783,6 +765,13 @@ class ArrayDirectory {
       const std::vector<URI>& array_schema_dir_uris);
 
   /**
+   * Select the URI to use for the latest array schema.
+   *
+   * @return URI The latest array schema URI to use.
+   */
+  URI select_latest_array_schema_uri();
+
+  /**
    * Checks if a fragment overlaps with the array directory timestamp
    * range. Overlap is partial or full depending on the consolidation
    * type (with timestamps or not).
@@ -828,9 +817,20 @@ class ArrayDirectory {
    * @return True if supported, false otherwise
    */
   bool consolidation_with_timestamps_supported(const URI& uri) const;
+
+  /**
+   * Load an enumeration from the given path.
+   *
+   * @param enumeration_path The enumeration path to load.
+   * @param encryption_key The encryption key to use.
+   * @return shared_ptr<Enumeration> The loaded enumeration.
+   */
+  shared_ptr<const Enumeration> load_enumeration(
+      const std::string& enumeration_path,
+      const EncryptionKey& encryption_key,
+      MemoryTracker& memory_tracker) const;
 };
 
-}  // namespace sm
-}  // namespace tiledb
+}  // namespace tiledb::sm
 
 #endif  // TILEDB_ARRAY_DIRECTORY_H
