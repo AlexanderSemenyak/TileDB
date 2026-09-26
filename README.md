@@ -1,4 +1,4 @@
-origin: TileDB-Inc/TileDB
+origin: https://github.com/TileDB-Inc/TileDB
 
 <a href="https://tiledb.com"><img src="https://github.com/TileDB-Inc/TileDB/raw/main/doc/source/_static/tiledb-logo_color_no_margin_@4x.png" alt="TileDB logo" width="400"></a>
 
